@@ -78,6 +78,46 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
+// Helper untuk mengambil workspaceId yang valid
+async function getWorkspaceId(tk) {
+  const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
+  
+  // Coba query workspaces
+  const qWs = {
+    query: `query {
+      workspaces {
+        id
+        name
+      }
+    }`
+  };
+  try {
+    const res = await axios.post('https://backboard.railway.app/graphql/v2', qWs, { headers });
+    const list = res.data?.data?.workspaces;
+    if (list && list.length > 0) return list[0].id;
+  } catch (e) {}
+
+  // Fallback query me
+  const qMe = {
+    query: `query {
+      me {
+        id
+        workspaces {
+          id
+        }
+      }
+    }`
+  };
+  try {
+    const res = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
+    const me = res.data?.data?.me;
+    if (me?.workspaces && me.workspaces.length > 0) return me.workspaces[0].id;
+    if (me?.id) return me.id;
+  } catch (e) {}
+
+  return null;
+}
+
 bot.on('message', async (msg) => {
   const id = msg.chat.id;
   const text = msg.text;
@@ -120,10 +160,10 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, '*Status Profil:*\n- Token: ' + tk + '\n- VPS: ' + vp, { parse_mode: 'Markdown' });
   }
 
-  // Tombol Cek Token: Ambil Workspace, Project & Kuota
+  // Tombol Cek Token
   if (text === '🔍 Cek Token') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
-    bot.sendMessage(id, '⏳ Memeriksa data akun dan workspace Railway...');
+    bot.sendMessage(id, '⏳ Memeriksa data akun dan project Railway...');
     try {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
@@ -133,18 +173,6 @@ bot.on('message', async (msg) => {
             id
             email
             name
-            workspaces {
-              id
-              name
-              projects {
-                edges {
-                  node {
-                    id
-                    name
-                  }
-                }
-              }
-            }
             projects {
               edges {
                 node {
@@ -160,13 +188,14 @@ bot.on('message', async (msg) => {
       if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
 
       const me = resMe.data.data.me;
-      const workspace = me.workspaces?.[0];
-      const projects = workspace?.projects?.edges || me.projects?.edges || [];
+      const wsId = await getWorkspaceId(tk);
+      const projects = me.projects?.edges || [];
       const totalProjects = projects.length;
 
       let report = `👤 *Info Akun Railway:*\n`;
       report += `- Nama: \`${me.name || 'User'}\`\n`;
-      report += `- Workspace: \`${workspace?.name || 'Default'}\` (\`${workspace?.id || 'Personal'}\`)\n\n`;
+      report += `- Email: \`${me.email || '-'}\`\n`;
+      report += `- Workspace ID: \`${wsId || 'Tidak Terdeteksi'}\`\n\n`;
       report += `📦 *Daftar Project (${totalProjects}):*\n`;
 
       if (totalProjects === 0) {
@@ -176,7 +205,7 @@ bot.on('message', async (msg) => {
         projects.forEach((p, idx) => {
           report += `${idx + 1}. *${p.node.name}* (\`${p.node.id}\`)\n`;
         });
-        report += `\n⚠️ *Catatan:* Railway akun gratis membatasi resource bersamaan. Hapus project di atas jika ingin membuat VPS baru.`;
+        report += `\n⚠️ *Catatan:* Hapus project di atas lewat dashboard Railway jika ingin mendeploy VPS baru.`;
       }
 
       return bot.sendMessage(id, report, { parse_mode: 'Markdown' });
@@ -186,42 +215,29 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS: Injeksi Workspace ID Otomatis
+  // Buat VPS
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const pass = genPass();
-    bot.sendMessage(id, '⏳ Mengambil data workspace dan mendeploy container Ubuntu 22.04...');
+    bot.sendMessage(id, '⏳ Menyiapkan workspace dan mendeploy container Ubuntu 22.04...\nMohon tunggu sekitar 20-30 detik.');
 
     try {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
 
-      // 1. Ambil workspaceId dari token
-      const qMe = {
-        query: `query {
-          me {
-            id
-            workspaces {
-              id
-              name
-            }
-          }
-        }`
-      };
-      const resMe = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
-      if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
-
-      const workspaceId = resMe.data.data.me?.workspaces?.[0]?.id;
-
-      // 2. Buat Project Baru dengan workspaceId
-      const projectInput = { name: `vps-${id}` };
-      if (workspaceId) {
-        projectInput.workspaceId = workspaceId;
+      // 1. Ambil Workspace ID
+      const wsId = await getWorkspaceId(tk);
+      if (!wsId) {
+        throw new Error('Gagal menemukan workspaceId pada akun Anda. Pastikan akun Railway telah terverifikasi.');
       }
 
+      // 2. Buat Project Baru dengan workspaceId
       const qP = {
-        query: `mutation($input: ProjectCreateInput!) {
-          projectCreate(input: $input) {
+        query: `mutation {
+          projectCreate(input: {
+            name: "vps-${id}",
+            workspaceId: "${wsId}"
+          }) {
             id
             environments {
               edges {
@@ -232,8 +248,7 @@ bot.on('message', async (msg) => {
               }
             }
           }
-        }`,
-        variables: { input: projectInput }
+        }`
       };
 
       const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
@@ -309,7 +324,7 @@ bot.on('message', async (msg) => {
     } catch (err) {
       console.error(err.response?.data || err.message);
       const errMsg = err.response?.data?.errors?.[0]?.message || err.message || 'Gagal deploy ke Railway.';
-      return bot.sendMessage(id, '❌ *Deploy Gagal:*\n`' + errMsg + '`\n\nPastikan tunggu 30 detik antar pembuatan project dan gunakan tombol *🔍 Cek Token* untuk cek status.', { parse_mode: 'Markdown' });
+      return bot.sendMessage(id, '❌ *Deploy Gagal:*\n`' + errMsg + '`', { parse_mode: 'Markdown' });
     }
   }
 
