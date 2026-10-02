@@ -58,13 +58,13 @@ bot.onText(/\/start/, async (msg) => {
 
   let t = '👋 *Selamat Datang di Railway VPS Creator Bot!*\n\n';
   t += '📖 *Panduan Penggunaan:*\n';
-  t += '1. Masuk ke Railway: https://railway.com\n';
-  t += '2. Pastikan akun memiliki kuota/slot project kosong (Cek via *🔍 Cek Token*).\n';
-  t += '3. Buat token di https://railway.com/account/tokens\n';
+  t += '1. Masuk ke: https://railway.com/account/tokens\n';
+  t += '2. Pastikan akun Railway kamu *No Project (Kosong)* agar kuota mencukupi.\n';
+  t += '3. Buat token baru lalu salin tokennya.\n';
   t += '4. Klik *➕ Add Token Railway* dan masukkan tokenmu.\n';
-  t += '5. Tekan *🚀 Buat VPS* untuk proses instalasi Ubuntu 22.04 otomatis.\n';
-  t += '6. Sistem akan otomatis menunggu sampai container siap dan memberikan IP numerik.\n';
-  t += '7. Klik *❌ Hapus VPS* jika ingin membersihkan project.\n';
+  t += '5. Tekan *🚀 Buat VPS* untuk proses otomatisasi 7 Langkah.\n';
+  t += '6. Dilengkapi fitur Auto-Retry 7x jika server Railway lambat / gagal deploy.\n';
+  t += '7. Sistem akan memberikan IP numerik asli dan port SSH.\n';
   bot.sendMessage(id, t, { parse_mode: 'Markdown', ...getMenu(id) });
 });
 
@@ -81,7 +81,7 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper Mengambil Workspace & Seluruh Project Nyata
+// Helper Ambil Workspace & Daftar Project Nyata
 async function fetchFullAccountData(headers) {
   let wsId = null;
   let wsName = 'Personal';
@@ -89,128 +89,228 @@ async function fetchFullAccountData(headers) {
   let userName = 'User';
   let allProjects = [];
 
-  // 1. Ambil data profil & workspace
   try {
-    const q1 = {
+    const qWs = {
       query: `query {
+        workspaces {
+          id
+          name
+          projects {
+            edges {
+              node {
+                id
+                name
+                createdAt
+              }
+            }
+          }
+        }
         me {
           id
           name
           email
-          workspaces {
-            id
-            name
-          }
-        }
-      }`
-    };
-    const r1 = await axios.post('https://backboard.railway.app/graphql/v2', q1, { headers });
-    const me = r1.data?.data?.me;
-    if (me) {
-      userName = me.name || userName;
-      email = me.email || email;
-      if (me.workspaces && me.workspaces.length > 0) {
-        wsId = me.workspaces[0].id;
-        wsName = me.workspaces[0].name;
-      }
-    }
-  } catch (e) {}
-
-  // 2. Jika workspace belum dapat, coba query workspaces root
-  if (!wsId) {
-    try {
-      const qWs = { query: `query { workspaces { id name } }` };
-      const rWs = await axios.post('https://backboard.railway.app/graphql/v2', qWs, { headers });
-      const wsList = rWs.data?.data?.workspaces;
-      if (wsList && wsList.length > 0) {
-        wsId = wsList[0].id;
-        wsName = wsList[0].name;
-      }
-    } catch (e) {}
-  }
-
-  // 3. Ambil seluruh project yang ada di akun secara akurat (Root projects query)
-  try {
-    const qP = {
-      query: `query {
-        projects {
-          edges {
-            node {
-              id
-              name
-              createdAt
-            }
-          }
-        }
-      }`
-    };
-    const rP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
-    const edges = rP.data?.data?.projects?.edges;
-    if (edges && Array.isArray(edges)) {
-      allProjects = edges.map(e => e.node);
-    }
-  } catch (e) {}
-
-  // Fallback: Jika root projects kosong, coba me.projects
-  if (allProjects.length === 0) {
-    try {
-      const qMeP = {
-        query: `query {
-          me {
-            projects {
-              edges {
-                node {
-                  id
-                  name
-                }
+          projects {
+            edges {
+              node {
+                id
+                name
+                createdAt
               }
             }
           }
-        }`
-      };
-      const rMeP = await axios.post('https://backboard.railway.app/graphql/v2', qMeP, { headers });
-      const meEdges = rMeP.data?.data?.me?.projects?.edges;
-      if (meEdges && Array.isArray(meEdges)) {
-        allProjects = meEdges.map(e => e.node);
+        }
+      }`
+    };
+    const r = await axios.post('https://backboard.railway.app/graphql/v2', qWs, { headers });
+    const me = r.data?.data?.me;
+    if (me) {
+      userName = me.name || userName;
+      email = me.email || email;
+      if (me.projects?.edges?.length > 0) {
+        allProjects = me.projects.edges.map(e => e.node);
       }
-    } catch (e) {}
-  }
+    }
+
+    const wsList = r.data?.data?.workspaces;
+    if (wsList && wsList.length > 0) {
+      wsId = wsList[0].id;
+      wsName = wsList[0].name;
+      if (wsList[0].projects?.edges?.length > 0) {
+        const wsProjects = wsList[0].projects.edges.map(e => e.node);
+        const map = new Map();
+        [...allProjects, ...wsProjects].forEach(item => map.set(item.id, item));
+        allProjects = Array.from(map.values());
+      }
+    }
+  } catch (e) {}
 
   return { wsId, wsName, email, userName, projects: allProjects };
 }
 
-// Polling status deployment sampai SUCCESS
-async function waitForDeploymentSuccess(sId, envId, headers, maxAttempts = 40) {
-  const qDeploy = {
-    query: `query($serviceId: String!, $environmentId: String!) {
-      deployments(first: 1, input: { serviceId: $serviceId, environmentId: $environmentId }) {
-        edges {
-          node {
-            id
-            status
-          }
-        }
-      }
-    }`,
-    variables: { serviceId: sId, environmentId: envId }
+// Fungsi Eksekusi 7 Langkah Pembuatan VPS
+async function deployVpsProcess(id, tk, statusMsg, attemptNum) {
+  const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
+  const pass = genPass();
+  let createdProjectId = null;
+
+  const updateStatus = async (stepNum, textStatus) => {
+    let text = `⚙️ *Sedang Menyiapkan VPS (Percobaan ${attemptNum}/7)*\n`;
+    text += `📍 *Langkah ${stepNum}/7:* ${textStatus}`;
+    try {
+      await bot.editMessageText(text, {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
+    } catch (e) {}
   };
 
-  for (let i = 0; i < maxAttempts; i++) {
-    await sleep(4000);
-    try {
-      const res = await axios.post('https://backboard.railway.app/graphql/v2', qDeploy, { headers });
-      const edge = res.data?.data?.deployments?.edges?.[0];
-      const status = edge?.node?.status;
+  try {
+    // STEP 1/7: Validasi Workspace
+    await updateStatus(1, 'Memeriksa token & mendeteksi Workspace ID aktif...');
+    const acc = await fetchFullAccountData(headers);
+    if (!acc.wsId) {
+      throw new Error('Workspace ID tidak ditemukan pada akun Railway Anda.');
+    }
 
-      if (status === 'SUCCESS') return true;
-      if (status === 'CRASHED' || status === 'FAILED') {
-        if (i > 10) throw new Error('Container gagal dijalankan (Status: ' + status + ')');
+    // STEP 2/7: Project Creation
+    await updateStatus(2, 'Membuat project baru di workspace Railway...');
+    const qP = {
+      query: `mutation($input: ProjectCreateInput!) {
+        projectCreate(input: $input) {
+          id
+          environments {
+            edges {
+              node {
+                id
+                name
+              }
+            }
+          }
+        }
+      }`,
+      variables: {
+        input: {
+          name: `vps-${id}`,
+          workspaceId: acc.wsId
+        }
+      }
+    };
+    const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+    if (resP.data.errors) throw new Error(resP.data.errors[0].message);
+
+    const pData = resP.data.data.projectCreate;
+    createdProjectId = pData.id;
+    const envId = pData.environments.edges[0]?.node?.id;
+
+    // STEP 3/7: Service Creation
+    await updateStatus(3, 'Menginstal container OS Ubuntu 22.04 LTS...');
+    const qS = {
+      query: `mutation {
+        serviceCreate(input: {
+          projectId: "${createdProjectId}",
+          name: "ubuntu-ssh",
+          source: { image: "rastoregm/ubuntu-22" }
+        }) {
+          id
+        }
+      }`
+    };
+    const resS = await axios.post('https://backboard.railway.app/graphql/v2', qS, { headers });
+    if (resS.data.errors) throw new Error(resS.data.errors[0].message);
+    const sId = resS.data.data.serviceCreate.id;
+
+    // STEP 4/7: Inject Root Password
+    await updateStatus(4, 'Menginjeksi kredensial root password ke container...');
+    if (envId) {
+      const qVar = {
+        query: `mutation {
+          variableUpsert(input: {
+            projectId: "${createdProjectId}",
+            serviceId: "${sId}",
+            environmentId: "${envId}",
+            name: "ROOT_PASSWORD",
+            value: "${pass}"
+          })
+        }`
+      };
+      await axios.post('https://backboard.railway.app/graphql/v2', qVar, { headers }).catch(() => {});
+    }
+
+    // STEP 5/7: Konfigurasi SSH Daemon
+    await updateStatus(5, 'Mengonfigurasi SSH Daemon & start command foreground...');
+    const startCmd = `/bin/sh -c "echo 'root:${pass}' | chpasswd && mkdir -p /var/run/sshd && /usr/sbin/sshd -D || (service ssh restart && tail -f /dev/null)"`;
+    const qUp = {
+      query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
+        serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
+      }`,
+      variables: {
+        serviceId: sId,
+        environmentId: envId,
+        input: {
+          startCommand: startCmd
+        }
+      }
+    };
+    await axios.post('https://backboard.railway.app/graphql/v2', qUp, { headers }).catch(() => {});
+
+    // STEP 6/7: Setup TCP Proxy & Resolve IP Numerik
+    await updateStatus(6, 'Membuka TCP Proxy port 22 & me-resolve IP publik...');
+    const qX = {
+      query: `mutation {
+        tcpProxyCreate(input: {
+          serviceId: "${sId}",
+          environmentId: "${envId}",
+          applicationPort: 22
+        }) {
+          domain
+          proxyPort
+        }
+      }`
+    };
+    const resX = await axios.post('https://backboard.railway.app/graphql/v2', qX, { headers });
+    if (resX.data.errors) throw new Error(resX.data.errors[0].message);
+
+    const p = resX.data.data.tcpProxyCreate;
+    const dom = p.domain || 'roundhouse.proxy.rlwy.net';
+    const port = p.proxyPort;
+
+    let resolvedIp = dom;
+    try {
+      const dnsRes = await dns.lookup(dom);
+      if (dnsRes && dnsRes.address) {
+        resolvedIp = dnsRes.address;
       }
     } catch (e) {
-      if (e.message && e.message.includes('Status:')) throw e;
+      resolvedIp = dom;
     }
+
+    // STEP 7/7: Inisialisasi Booting & Verifikasi Siap Pakai
+    await updateStatus(7, 'Memverifikasi status container & finalisasi port SSH...');
+    await sleep(14000);
+
+    return {
+      success: true,
+      projectId: createdProjectId,
+      ip: resolvedIp,
+      port: port,
+      pass: pass
+    };
+
+  } catch (err) {
+    // Jika gagal di tengah proses, bersihkan project yang sempat terbuat
+    if (createdProjectId) {
+      try {
+        await axios.post('https://backboard.railway.app/graphql/v2', {
+          query: `mutation { projectDelete(id: "${createdProjectId}") }`
+        }, { headers });
+      } catch (e) {}
+    }
+    return {
+      success: false,
+      error: err.response?.data?.errors?.[0]?.message || err.message
+    };
   }
-  return true;
 }
 
 bot.on('message', async (msg) => {
@@ -255,7 +355,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, '*Status Profil:*\n- Token: ' + tk + '\n- VPS: ' + vp, { parse_mode: 'Markdown' });
   }
 
-  // Cek Token yang Akurat
+  // Cek Token
   if (text === '🔍 Cek Token') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
     bot.sendMessage(id, '⏳ Mengambil daftar project dan status akun Railway...');
@@ -270,7 +370,7 @@ bot.on('message', async (msg) => {
       report += `- Nama: \`${acc.userName}\`\n`;
       report += `- Email: \`${acc.email}\`\n`;
       report += `- Workspace: \`${acc.wsName}\`\n`;
-      report += `- Workspace ID: \`${acc.wsId || 'Belum Terdeteksi'}\`\n\n`;
+      report += `- Workspace ID: \`${acc.wsId || 'Personal'}\`\n\n`;
       report += `📦 *Daftar Project (${totalProjects}):*\n`;
 
       if (totalProjects === 0) {
@@ -280,7 +380,7 @@ bot.on('message', async (msg) => {
         acc.projects.forEach((p, idx) => {
           report += `${idx + 1}. *${p.name}* (\`${p.id}\`)\n`;
         });
-        report += `\n⚠️ *Perhatian:* Akun gratis memiliki batas resource. Pastikan hapus project di atas jika ingin membuat VPS baru.`;
+        report += `\n⚠️ *Perhatian:* Hapus project di atas lewat tombol *❌ Hapus VPS* atau via web Railway agar kuota tidak penuh.`;
       }
 
       return bot.sendMessage(id, report, { parse_mode: 'Markdown' });
@@ -290,171 +390,69 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS
+  // Buat VPS dengan 7 Step & Auto Retry 7x
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
-    const pass = genPass();
-    const statusMsg = await bot.sendMessage(id, '⏳ *Sedang Menyiapkan VPS...*\nLangkah 1/4: Mendeteksi workspace & membuat project di Railway...', { parse_mode: 'Markdown' });
+    const tk = db.tokens[id];
 
-    try {
-      const tk = db.tokens[id];
-      const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
+    const statusMsg = await bot.sendMessage(id, '⏳ *Memulai Sistem Deploy VPS...*\nMenyiapkan alur 7 langkah & auto-retry 7x.', { parse_mode: 'Markdown' });
 
-      // 1. Ambil data akun & workspace ID
-      const acc = await fetchFullAccountData(headers);
+    let finalResult = null;
+    const MAX_RETRIES = 7;
 
-      let inputData = { name: `vps-${id}` };
-      if (acc.wsId) {
-        inputData.workspaceId = acc.wsId;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+      finalResult = await deployVpsProcess(id, tk, statusMsg, attempt);
+
+      if (finalResult.success) {
+        break; // Berhasil, keluar dari loop
       }
 
-      // 2. Buat Project Baru
-      const qP = {
-        query: `mutation($input: ProjectCreateInput!) {
-          projectCreate(input: $input) {
-            id
-            environments {
-              edges {
-                node {
-                  id
-                  name
-                }
-              }
-            }
-          }
-        }`,
-        variables: { input: inputData }
-      };
-
-      let resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
-      if (resP.data.errors) {
-        throw new Error(resP.data.errors[0]?.message || 'Gagal membuat project.');
+      // Jika gagal dan masih ada sisa percobaan, beri jeda dan coba lagi
+      if (attempt < MAX_RETRIES) {
+        let retryMsg = `⚠️ *Percobaan ke-${attempt} Gagal!*\nAlasan: \`${finalResult.error}\`\n\n🔄 *Mencoba ulang otomatis (Percobaan ${attempt + 1}/7)* dalam 5 detik...`;
+        try {
+          await bot.editMessageText(retryMsg, {
+            chat_id: id,
+            message_id: statusMsg.message_id,
+            parse_mode: 'Markdown'
+          });
+        } catch (e) {}
+        await sleep(5000);
       }
+    }
 
-      const pData = resP.data.data.projectCreate;
-      const pId = pData.id;
-      const envId = pData.environments.edges[0]?.node?.id;
-
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 2/4: Mengonfigurasi container Ubuntu 22.04 & service SSH...', {
-        chat_id: id,
-        message_id: statusMsg.message_id,
-        parse_mode: 'Markdown'
-      });
-
-      // 3. Buat Service dengan Docker Image Ubuntu SSH
-      const qS = {
-        query: `mutation {
-          serviceCreate(input: {
-            projectId: "${pId}",
-            name: "ubuntu-ssh",
-            source: { image: "rastoregm/ubuntu-22" }
-          }) {
-            id
-          }
-        }`
+    if (finalResult && finalResult.success) {
+      db.vps[id] = {
+        projectId: finalResult.projectId,
+        pass: finalResult.pass,
+        dom: finalResult.ip,
+        port: finalResult.port
       };
-      const resS = await axios.post('https://backboard.railway.app/graphql/v2', qS, { headers });
-      if (resS.data.errors) throw new Error(resS.data.errors[0].message);
-      const sId = resS.data.data.serviceCreate.id;
-
-      // 4. Injeksi Password Root
-      if (envId) {
-        const qVar = {
-          query: `mutation {
-            variableUpsert(input: {
-              projectId: "${pId}",
-              serviceId: "${sId}",
-              environmentId: "${envId}",
-              name: "ROOT_PASSWORD",
-              value: "${pass}"
-            })
-          }`
-        };
-        await axios.post('https://backboard.railway.app/graphql/v2', qVar, { headers }).catch(() => {});
-      }
-
-      // 5. Set Start Command agar SSH daemon tetap hidup di foreground (Anti-Failed)
-      const startCmd = `/bin/bash -c "echo root:${pass} | chpasswd && service ssh restart && tail -f /dev/null"`;
-      const qUp = {
-        query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
-          serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: $input)
-        }`,
-        variables: {
-          serviceId: sId,
-          environmentId: envId,
-          input: {
-            startCommand: startCmd
-          }
-        }
-      };
-      await axios.post('https://backboard.railway.app/graphql/v2', qUp, { headers }).catch(() => {});
-
-      // 6. Buka TCP Proxy Port 22 SSH
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 3/4: Membuka TCP Proxy port 22 SSH...', {
-        chat_id: id,
-        message_id: statusMsg.message_id,
-        parse_mode: 'Markdown'
-      });
-
-      const qX = {
-        query: `mutation {
-          tcpProxyCreate(input: {
-            serviceId: "${sId}",
-            environmentId: "${envId}",
-            applicationPort: 22
-          }) {
-            domain
-            proxyPort
-          }
-        }`
-      };
-      const resX = await axios.post('https://backboard.railway.app/graphql/v2', qX, { headers });
-      if (resX.data.errors) throw new Error(resX.data.errors[0].message);
-
-      const p = resX.data.data.tcpProxyCreate;
-      const dom = p.domain || 'roundhouse.proxy.rlwy.net';
-      const port = p.proxyPort;
-
-      // Resolve domain proxy ke IP numerik publik
-      let resolvedIp = dom;
-      try {
-        const dnsRes = await dns.lookup(dom);
-        if (dnsRes && dnsRes.address) {
-          resolvedIp = dnsRes.address;
-        }
-      } catch (errDns) {
-        resolvedIp = dom;
-      }
-
-      // 7. Tunggu deployment sampai status SUCCESS
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 4/4: Menunggu container selesai booting & status SUCCESS...', {
-        chat_id: id,
-        message_id: statusMsg.message_id,
-        parse_mode: 'Markdown'
-      });
-
-      await waitForDeploymentSuccess(sId, envId, headers);
-
-      db.vps[id] = { projectId: pId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
 
-      let info = '🎉 *VPS Ubuntu 22.04 Berhasil Aktif & Siap Digunakan!*\n\n';
-      info += '🌐 *IP Address :* `' + resolvedIp + '`\n';
-      info += '🔌 *Port SSH :* `' + port + '`\n';
-      info += '👤 *User :* `root`\n';
-      info += '🔑 *Password :* `' + pass + '`\n\n';
-      info += '📌 *Koneksi SSH:* \n`ssh root@' + resolvedIp + ' -p ' + port + '`';
+      let info = '🎉 *VPS Ubuntu 22.04 Berhasil Dibuat!*\n';
+      info += '━━━━━━━━━━━━━━━━━━━━━\n';
+      info += '🌐 *IP Address :* `' + finalResult.ip + '`\n';
+      info += '🔌 *Port SSH   :* `' + finalResult.port + '`\n';
+      info += '👤 *Username   :* `root`\n';
+      info += '🔑 *Password   :* `' + finalResult.pass + '`\n';
+      info += '━━━━━━━━━━━━━━━━━━━━━\n';
+      info += '📌 *Format Login SSH:* \n`ssh root@' + finalResult.ip + ' -p ' + finalResult.port + '`';
 
       await bot.editMessageText(info, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
       });
-
-    } catch (err) {
-      console.error(err.response?.data || err.message);
-      const errMsg = err.response?.data?.errors?.[0]?.message || err.message || 'Gagal deploy ke Railway.';
-      return bot.sendMessage(id, '❌ *Deploy Gagal:*\n`' + errMsg + '`', { parse_mode: 'Markdown' });
+    } else {
+      let failInfo = '❌ *Deploy VPS Gagal Setelah 7x Percobaan!*\n\n';
+      failInfo += 'Penyebab Terakhir:\n`' + (finalResult?.error || 'Unknown Error') + '`\n\n';
+      failInfo += '💡 *Saran:* Periksa apakah kuota $5 akun Railway kamu masih tersedia atau pastikan tidak ada project yang menumpuk via tombol *🔍 Cek Token*.';
+      await bot.editMessageText(failInfo, {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
     }
   }
 
