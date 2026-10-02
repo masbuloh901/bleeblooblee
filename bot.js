@@ -120,10 +120,10 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, '*Status Profil:*\n- Token: ' + tk + '\n- VPS: ' + vp, { parse_mode: 'Markdown' });
   }
 
-  // Tombol Baru: Cek Detail Token, Project, & Kuota
+  // Tombol Cek Token: Ambil Workspace, Project & Kuota
   if (text === '🔍 Cek Token') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
-    bot.sendMessage(id, '⏳ Memeriksa data akun dan project Railway...');
+    bot.sendMessage(id, '⏳ Memeriksa data akun dan workspace Railway...');
     try {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
@@ -133,12 +133,23 @@ bot.on('message', async (msg) => {
             id
             email
             name
+            workspaces {
+              id
+              name
+              projects {
+                edges {
+                  node {
+                    id
+                    name
+                  }
+                }
+              }
+            }
             projects {
               edges {
                 node {
                   id
                   name
-                  createdAt
                 }
               }
             }
@@ -149,12 +160,13 @@ bot.on('message', async (msg) => {
       if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
 
       const me = resMe.data.data.me;
-      const projects = me.projects?.edges || [];
+      const workspace = me.workspaces?.[0];
+      const projects = workspace?.projects?.edges || me.projects?.edges || [];
       const totalProjects = projects.length;
 
       let report = `👤 *Info Akun Railway:*\n`;
       report += `- Nama: \`${me.name || 'User'}\`\n`;
-      report += `- Email: \`${me.email || '-'}\`\n\n`;
+      report += `- Workspace: \`${workspace?.name || 'Default'}\` (\`${workspace?.id || 'Personal'}\`)\n\n`;
       report += `📦 *Daftar Project (${totalProjects}):*\n`;
 
       if (totalProjects === 0) {
@@ -164,7 +176,7 @@ bot.on('message', async (msg) => {
         projects.forEach((p, idx) => {
           report += `${idx + 1}. *${p.node.name}* (\`${p.node.id}\`)\n`;
         });
-        report += `\n⚠️ *Catatan:* Railway akun gratis membatasi jumlah resource bersamaan. Jika deploy gagal, pastikan hapus project lama terlebih dahulu.`;
+        report += `\n⚠️ *Catatan:* Railway akun gratis membatasi resource bersamaan. Hapus project di atas jika ingin membuat VPS baru.`;
       }
 
       return bot.sendMessage(id, report, { parse_mode: 'Markdown' });
@@ -174,20 +186,42 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Deploy VPS
+  // Buat VPS: Injeksi Workspace ID Otomatis
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const pass = genPass();
-    bot.sendMessage(id, '⏳ Memulai deploy container Ubuntu 22.04 ke Railway...');
+    bot.sendMessage(id, '⏳ Mengambil data workspace dan mendeploy container Ubuntu 22.04...');
 
     try {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
 
-      // 1. Buat Project Baru & Ambil Environment ID Default
+      // 1. Ambil workspaceId dari token
+      const qMe = {
+        query: `query {
+          me {
+            id
+            workspaces {
+              id
+              name
+            }
+          }
+        }`
+      };
+      const resMe = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
+      if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
+
+      const workspaceId = resMe.data.data.me?.workspaces?.[0]?.id;
+
+      // 2. Buat Project Baru dengan workspaceId
+      const projectInput = { name: `vps-${id}` };
+      if (workspaceId) {
+        projectInput.workspaceId = workspaceId;
+      }
+
       const qP = {
-        query: `mutation {
-          projectCreate(input: { name: "vps-${id}" }) {
+        query: `mutation($input: ProjectCreateInput!) {
+          projectCreate(input: $input) {
             id
             environments {
               edges {
@@ -198,8 +232,10 @@ bot.on('message', async (msg) => {
               }
             }
           }
-        }`
+        }`,
+        variables: { input: projectInput }
       };
+
       const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
       if (resP.data.errors) throw new Error(resP.data.errors[0].message);
 
@@ -207,7 +243,7 @@ bot.on('message', async (msg) => {
       const pId = pData.id;
       const envId = pData.environments.edges[0]?.node?.id;
 
-      // 2. Buat Service dengan Docker Image Ubuntu SSH
+      // 3. Buat Service Ubuntu SSH
       const qS = {
         query: `mutation {
           serviceCreate(input: {
@@ -223,7 +259,7 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Pasang Variabel Root Password di Environment
+      // 4. Injeksi Password Root
       if (envId) {
         const qVar = {
           query: `mutation {
@@ -239,7 +275,7 @@ bot.on('message', async (msg) => {
         await axios.post('https://backboard.railway.app/graphql/v2', qVar, { headers }).catch(() => {});
       }
 
-      // 4. Buat TCP Proxy ke Port 22 dengan environmentId
+      // 5. Buka TCP Proxy Port 22 SSH
       const qX = {
         query: `mutation {
           tcpProxyCreate(input: {
@@ -273,7 +309,7 @@ bot.on('message', async (msg) => {
     } catch (err) {
       console.error(err.response?.data || err.message);
       const errMsg = err.response?.data?.errors?.[0]?.message || err.message || 'Gagal deploy ke Railway.';
-      return bot.sendMessage(id, '❌ *Deploy Gagal:*\n`' + errMsg + '`\n\nCek tombol *🔍 Cek Token* untuk memastikan status akun atau hapus project yang menumpuk.', { parse_mode: 'Markdown' });
+      return bot.sendMessage(id, '❌ *Deploy Gagal:*\n`' + errMsg + '`\n\nPastikan tunggu 30 detik antar pembuatan project dan gunakan tombol *🔍 Cek Token* untuk cek status.', { parse_mode: 'Markdown' });
     }
   }
 
@@ -295,7 +331,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Admin Features
+  // Fitur Admin
   if (text === '👑 Admin: List User' && Number(id) === ADMIN_ID) {
     const u = Object.values(db.users);
     let r = '📋 Total: ' + u.length + ' user\n\n';
