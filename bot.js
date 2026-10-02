@@ -62,7 +62,7 @@ bot.onText(/\/start/, async (msg) => {
   t += '2. Pastikan akun memiliki minimal 1 Workspace (bisa dicek lewat menu *🔍 Cek Token*).\n';
   t += '3. Buat token di https://railway.com/account/tokens\n';
   t += '4. Klik *➕ Add Token Railway* dan kirimkan tokenmu.\n';
-  t += '5. Tekan *🚀 Buat VPS* untuk proses instalasi Ubuntu 22.04 otomatis.\n';
+  t += '5. Tekan *🚀 Buat VPS* untuk auto deploy container Ubuntu 22.04.\n';
   t += '6. Sistem akan otomatis menunggu sampai container siap dan memberikan IP numerik.\n';
   t += '7. Klik *❌ Hapus VPS* jika ingin membersihkan project.\n';
   bot.sendMessage(id, t, { parse_mode: 'Markdown', ...getMenu(id) });
@@ -81,42 +81,50 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper Multi-Metode Mendapatkan Workspace ID Valid
-async function resolveWorkspace(headers) {
-  // Metode 1: Query workspaces root
+// Fungsi pencarian workspaceId yang valid dan kompatibel dengan GraphQL Railway
+async function getValidWorkspace(headers) {
+  // Percobaan 1: Query workspaces via me
   try {
-    const r1 = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query { workspaces { id name } }`
-    }, { headers });
-    const ws = r1.data?.data?.workspaces;
+    const q1 = {
+      query: `query {
+        me {
+          id
+          name
+          email
+          workspaces {
+            id
+            name
+          }
+        }
+      }`
+    };
+    const r1 = await axios.post('https://backboard.railway.app/graphql/v2', q1, { headers });
+    const me = r1.data?.data?.me;
+    const wsList = me?.workspaces;
+    if (wsList && wsList.length > 0 && wsList[0].id) {
+      return { wsId: wsList[0].id, wsName: wsList[0].name, me: me };
+    }
+    if (me) return { wsId: null, wsName: 'Personal', me: me };
+  } catch (e) {}
+
+  // Percobaan 2: Query workspaces tingkat root
+  try {
+    const q2 = { query: `query { workspaces { id name } }` };
+    const r2 = await axios.post('https://backboard.railway.app/graphql/v2', q2, { headers });
+    const ws = r2.data?.data?.workspaces;
     if (ws && ws.length > 0 && ws[0].id) {
-      return { id: ws[0].id, name: ws[0].name };
+      return { wsId: ws[0].id, wsName: ws[0].name, me: null };
     }
   } catch (e) {}
 
-  // Metode 2: Query me { workspaces }
+  // Percobaan 3: Query profile dasar
   try {
-    const r2 = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query { me { workspaces { id name } } }`
-    }, { headers });
-    const ws = r2.data?.data?.me?.workspaces;
-    if (ws && ws.length > 0 && ws[0].id) {
-      return { id: ws[0].id, name: ws[0].name };
-    }
+    const q3 = { query: `query { me { id name email } }` };
+    const r3 = await axios.post('https://backboard.railway.app/graphql/v2', q3, { headers });
+    return { wsId: null, wsName: 'Personal', me: r3.data?.data?.me };
   } catch (e) {}
 
-  // Metode 3: Query me data profil
-  try {
-    const r3 = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query { me { id name email } }`
-    }, { headers });
-    const me = r3.data?.data?.me;
-    if (me && me.id) {
-      return { id: null, name: me.name || 'Personal', email: me.email };
-    }
-  } catch (e) {}
-
-  return { id: null, name: 'Unknown' };
+  return { wsId: null, wsName: 'Unknown', me: null };
 }
 
 // Polling status deployment sampai SUCCESS
@@ -203,51 +211,37 @@ bot.on('message', async (msg) => {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
 
-      const wsInfo = await resolveWorkspace(headers);
+      const { wsId, wsName, me } = await getValidWorkspace(headers);
 
-      const qMe = {
-        query: `query {
-          me {
-            id
-            email
-            name
-            projects {
-              edges {
-                node {
-                  id
-                  name
-                }
-              }
-            }
-          }
-        }`
-      };
-      const resMe = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
-      if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
+      // Ambil daftar project aktif
+      let projects = [];
+      try {
+        const qProj = { query: `query { me { projects { edges { node { id name } } } } }` };
+        const resProj = await axios.post('https://backboard.railway.app/graphql/v2', qProj, { headers });
+        projects = resProj.data?.data?.me?.projects?.edges || [];
+      } catch (e) {}
 
-      const me = resMe.data.data.me;
-      const projects = me.projects?.edges || [];
       const totalProjects = projects.length;
 
       let report = `👤 *Info Akun Railway:*\n`;
-      report += `- Nama: \`${me.name || 'User'}\`\n`;
-      report += `- Email: \`${me.email || '-'}\`\n`;
-      report += `- Workspace: \`${wsInfo.name || 'Personal'}\`\n`;
-      report += `- Workspace ID: \`${wsInfo.id || 'Belum Terbuat di Web'}\`\n\n`;
+      report += `- Nama: \`${me?.name || 'User'}\`\n`;
+      report += `- Email: \`${me?.email || '-'}\`\n`;
+      report += `- Workspace: \`${wsName}\`\n`;
+      report += `- Workspace ID: \`${wsId || 'Belum Ada (Wajib Buka Web)'}\`\n\n`;
       report += `📦 *Daftar Project (${totalProjects}):*\n`;
 
       if (totalProjects === 0) {
         report += `_Tidak ada project (No Project - Bersih)_\n\n`;
-        report += `🟢 *Status:* *Bisa Buat VPS Baru* ✅`;
+        if (wsId) {
+          report += `🟢 *Status:* *Bisa Buat VPS Baru* ✅`;
+        } else {
+          report += `🟡 *Status:* *Workspace ID Belum Aktif!*\nBuka https://railway.com di browser, login, dan buat 1 project / workspace agar ID aktif.`;
+        }
       } else {
         projects.forEach((p, idx) => {
           report += `${idx + 1}. *${p.node.name}* (\`${p.node.id}\`)\n`;
         });
         report += `\n⚠️ Hapus project di atas lewat dashboard Railway jika ingin mendeploy VPS baru.`;
-      }
-
-      if (!wsInfo.id) {
-        report += `\n\n⚠️ *Perhatian:* Akun ini belum menginisialisasi Workspace. Silakan buka https://railway.com di browser, login, dan buat 1 Workspace atau Project kosong agar ID Workspace aktif.`;
       }
 
       return bot.sendMessage(id, report, { parse_mode: 'Markdown' });
@@ -267,15 +261,14 @@ bot.on('message', async (msg) => {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
 
-      // 1. Deteksi Workspace ID
-      const wsInfo = await resolveWorkspace(headers);
+      // 1. Ambil Workspace ID Wajib
+      const { wsId } = await getValidWorkspace(headers);
 
-      let inputData = { name: `vps-${id}` };
-      if (wsInfo.id) {
-        inputData.workspaceId = wsInfo.id;
+      if (!wsId) {
+        throw new Error('Akun Anda belum memiliki Workspace ID di Railway. Silakan buka https://railway.com lewat browser HP Anda, login, lalu buat 1 Workspace atau Project di web agar akun terinisialisasi.');
       }
 
-      // 2. Buat Project Baru
+      // 2. Buat Project Baru dengan workspaceId
       const qP = {
         query: `mutation($input: ProjectCreateInput!) {
           projectCreate(input: $input) {
@@ -290,19 +283,16 @@ bot.on('message', async (msg) => {
             }
           }
         }`,
-        variables: { input: inputData }
+        variables: {
+          input: {
+            name: `vps-${id}`,
+            workspaceId: wsId
+          }
+        }
       };
 
-      let resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
-
-      // Jika gagal karena workspaceId wajib tapi belum terisi
-      if (resP.data.errors) {
-        const errFirst = resP.data.errors[0]?.message || '';
-        if (errFirst.includes('workspaceId') && !inputData.workspaceId) {
-          throw new Error('Akun Anda belum memiliki Workspace aktif di Railway. Silakan buka https://railway.com lewat browser HP Anda, login, lalu buat 1 Workspace baru.');
-        }
-        throw new Error(errFirst);
-      }
+      const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+      if (resP.data.errors) throw new Error(resP.data.errors[0].message);
 
       const pData = resP.data.data.projectCreate;
       const pId = pData.id;
