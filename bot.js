@@ -1,6 +1,7 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios = require('axios');
 const fs = require('fs');
+const dns = require('dns').promises;
 
 // Konfigurasi Utama
 const BOT_TOKEN = '8571356168:AAE5Au3Ekp9u-HAXJ0OM5CXBGK16faLP9nk';
@@ -23,6 +24,8 @@ function saveDB(d) {
 function genPass() {
   return 'Rabitszz' + Math.floor(10000 + Math.random() * 90000);
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const state = {};
 
@@ -61,7 +64,8 @@ bot.onText(/\/start/, async (msg) => {
   t += '4. Klik *➕ Add Token Railway* dan kirimkan tokenmu.\n';
   t += '5. Gunakan tombol *🔍 Cek Token* untuk memastikan slot project masih tersedia.\n';
   t += '6. Tekan *🚀 Buat VPS* untuk auto deploy container Ubuntu 22.04.\n';
-  t += '7. Klik *❌ Hapus VPS* jika ingin membersihkan project.\n';
+  t += '7. Sistem akan menampilkan IP Address asli hasil resolve proxy Railway.\n';
+  t += '8. Klik *❌ Hapus VPS* jika ingin membersihkan project.\n';
   bot.sendMessage(id, t, { parse_mode: 'Markdown', ...getMenu(id) });
 });
 
@@ -78,44 +82,83 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper untuk mengambil workspaceId yang valid
-async function getWorkspaceId(tk) {
+// Ambil Workspace / Team ID
+async function fetchWorkspaceInfo(tk) {
   const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
   
-  // Coba query workspaces
-  const qWs = {
-    query: `query {
-      workspaces {
-        id
-        name
-      }
-    }`
-  };
-  try {
-    const res = await axios.post('https://backboard.railway.app/graphql/v2', qWs, { headers });
-    const list = res.data?.data?.workspaces;
-    if (list && list.length > 0) return list[0].id;
-  } catch (e) {}
-
-  // Fallback query me
-  const qMe = {
+  const q = {
     query: `query {
       me {
         id
-        workspaces {
+        name
+        email
+        teams {
           id
+          name
+        }
+        projects {
+          edges {
+            node {
+              id
+              name
+              teamId
+            }
+          }
         }
       }
     }`
   };
-  try {
-    const res = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
-    const me = res.data?.data?.me;
-    if (me?.workspaces && me.workspaces.length > 0) return me.workspaces[0].id;
-    if (me?.id) return me.id;
-  } catch (e) {}
 
-  return null;
+  const res = await axios.post('https://backboard.railway.app/graphql/v2', q, { headers });
+  if (res.data.errors) throw new Error(res.data.errors[0].message);
+
+  const me = res.data.data.me;
+  let wsId = null;
+  if (me.teams && me.teams.length > 0) {
+    wsId = me.teams[0].id;
+  } else if (me.projects && me.projects.edges.length > 0 && me.projects.edges[0].node.teamId) {
+    wsId = me.projects.edges[0].node.teamId;
+  } else {
+    wsId = me.id;
+  }
+
+  return { me, wsId };
+}
+
+// Tunggu deployment berstatus SUCCESS
+async function waitForDeploymentSuccess(sId, envId, headers, maxAttempts = 30) {
+  const qDeploy = {
+    query: `query($serviceId: String!, $environmentId: String!) {
+      deployments(first: 1, input: { serviceId: $serviceId, environmentId: $environmentId }) {
+        edges {
+          node {
+            id
+            status
+          }
+        }
+      }
+    }`,
+    variables: { serviceId: sId, environmentId: envId }
+  };
+
+  for (let i = 0; i < maxAttempts; i++) {
+    await sleep(4000);
+    try {
+      const res = await axios.post('https://backboard.railway.app/graphql/v2', qDeploy, { headers });
+      const edge = res.data?.data?.deployments?.edges?.[0];
+      const status = edge?.node?.status;
+
+      if (status === 'SUCCESS') {
+        return true;
+      }
+      if (status === 'CRASHED' || status === 'FAILED') {
+        throw new Error('Container gagal dijalankan (Status: ' + status + ')');
+      }
+    } catch (e) {
+      if (e.message && e.message.includes('Status:')) throw e;
+    }
+  }
+  return true;
 }
 
 bot.on('message', async (msg) => {
@@ -160,42 +203,20 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, '*Status Profil:*\n- Token: ' + tk + '\n- VPS: ' + vp, { parse_mode: 'Markdown' });
   }
 
-  // Tombol Cek Token
+  // Cek Token
   if (text === '🔍 Cek Token') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
     bot.sendMessage(id, '⏳ Memeriksa data akun dan project Railway...');
     try {
       const tk = db.tokens[id];
-      const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
-      const qMe = {
-        query: `query {
-          me {
-            id
-            email
-            name
-            projects {
-              edges {
-                node {
-                  id
-                  name
-                }
-              }
-            }
-          }
-        }`
-      };
-      const resMe = await axios.post('https://backboard.railway.app/graphql/v2', qMe, { headers });
-      if (resMe.data.errors) throw new Error(resMe.data.errors[0].message);
-
-      const me = resMe.data.data.me;
-      const wsId = await getWorkspaceId(tk);
+      const { me, wsId } = await fetchWorkspaceInfo(tk);
       const projects = me.projects?.edges || [];
       const totalProjects = projects.length;
 
       let report = `👤 *Info Akun Railway:*\n`;
       report += `- Nama: \`${me.name || 'User'}\`\n`;
       report += `- Email: \`${me.email || '-'}\`\n`;
-      report += `- Workspace ID: \`${wsId || 'Tidak Terdeteksi'}\`\n\n`;
+      report += `- Workspace/Team ID: \`${wsId}\`\n\n`;
       report += `📦 *Daftar Project (${totalProjects}):*\n`;
 
       if (totalProjects === 0) {
@@ -205,7 +226,7 @@ bot.on('message', async (msg) => {
         projects.forEach((p, idx) => {
           report += `${idx + 1}. *${p.node.name}* (\`${p.node.id}\`)\n`;
         });
-        report += `\n⚠️ *Catatan:* Hapus project di atas lewat dashboard Railway jika ingin mendeploy VPS baru.`;
+        report += `\n⚠️ Hapus project di atas lewat dashboard Railway jika ingin mendeploy VPS baru.`;
       }
 
       return bot.sendMessage(id, report, { parse_mode: 'Markdown' });
@@ -219,20 +240,17 @@ bot.on('message', async (msg) => {
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const pass = genPass();
-    bot.sendMessage(id, '⏳ Menyiapkan workspace dan mendeploy container Ubuntu 22.04...\nMohon tunggu sekitar 20-30 detik.');
+    const statusMsg = await bot.sendMessage(id, '⏳ *Sedang Menyiapkan VPS...*\nLangkah 1/4: Menyiapkan project di workspace Railway...', { parse_mode: 'Markdown' });
 
     try {
       const tk = db.tokens[id];
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
 
-      // 1. Ambil Workspace ID
-      const wsId = await getWorkspaceId(tk);
-      if (!wsId) {
-        throw new Error('Gagal menemukan workspaceId pada akun Anda. Pastikan akun Railway telah terverifikasi.');
-      }
+      // 1. Ambil Workspace / Team ID
+      const { wsId } = await fetchWorkspaceInfo(tk);
 
-      // 2. Buat Project Baru dengan workspaceId
-      const qP = {
+      // 2. Buat Project Baru
+      let qP = {
         query: `mutation {
           projectCreate(input: {
             name: "vps-${id}",
@@ -251,12 +269,40 @@ bot.on('message', async (msg) => {
         }`
       };
 
-      const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+      let resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+      if (resP.data.errors) {
+        qP = {
+          query: `mutation {
+            projectCreate(input: {
+              name: "vps-${id}",
+              teamId: "${wsId}"
+            }) {
+              id
+              environments {
+                edges {
+                  node {
+                    id
+                    name
+                  }
+                }
+              }
+            }
+          }`
+        };
+        resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+      }
+
       if (resP.data.errors) throw new Error(resP.data.errors[0].message);
 
       const pData = resP.data.data.projectCreate;
       const pId = pData.id;
       const envId = pData.environments.edges[0]?.node?.id;
+
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 2/4: Membuat service Ubuntu 22.04 & menginjeksi password...', {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
 
       // 3. Buat Service Ubuntu SSH
       const qS = {
@@ -291,6 +337,12 @@ bot.on('message', async (msg) => {
       }
 
       // 5. Buka TCP Proxy Port 22 SSH
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 3/4: Membuka TCP Proxy port 22 SSH...', {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
+
       const qX = {
         query: `mutation {
           tcpProxyCreate(input: {
@@ -310,16 +362,41 @@ bot.on('message', async (msg) => {
       const dom = p.domain || 'roundhouse.proxy.rlwy.net';
       const port = p.proxyPort;
 
-      db.vps[id] = { projectId: pId, pass: pass, dom: dom, port: port };
+      // Resolve domain proxy ke IP publik
+      let resolvedIp = dom;
+      try {
+        const dnsRes = await dns.lookup(dom);
+        if (dnsRes && dnsRes.address) {
+          resolvedIp = dnsRes.address;
+        }
+      } catch (errDns) {
+        resolvedIp = dom;
+      }
+
+      // 6. Tunggu deployment sampai selesai dan berstatus SUCCESS
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\nLangkah 4/4: Menunggu container Ubuntu selesai booting & siap digunakan...', {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
+
+      await waitForDeploymentSuccess(sId, envId, headers);
+
+      db.vps[id] = { projectId: pId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
 
-      let info = '🎉 *VPS Ubuntu 22.04 Berhasil Dibuat!*\n\n';
-      info += '🌐 *Host / IP Proxy :* `' + dom + '`\n';
-      info += '🔌 *Port :* `' + port + '`\n';
+      let info = '🎉 *VPS Ubuntu 22.04 Berhasil Aktif & Siap Digunakan!*\n\n';
+      info += '🌐 *IP Address :* `' + resolvedIp + '`\n';
+      info += '🔌 *Port SSH :* `' + port + '`\n';
       info += '👤 *User :* `root`\n';
       info += '🔑 *Password :* `' + pass + '`\n\n';
-      info += '📌 *Koneksi SSH:* \n`ssh root@' + dom + ' -p ' + port + '`';
-      return bot.sendMessage(id, info, { parse_mode: 'Markdown' });
+      info += '📌 *Koneksi SSH:* \n`ssh root@' + resolvedIp + ' -p ' + port + '`';
+
+      await bot.editMessageText(info, {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
 
     } catch (err) {
       console.error(err.response?.data || err.message);
@@ -346,7 +423,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Fitur Admin
+  // Admin Features
   if (text === '👑 Admin: List User' && Number(id) === ADMIN_ID) {
     const u = Object.values(db.users);
     let r = '📋 Total: ' + u.length + ' user\n\n';
