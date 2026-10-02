@@ -78,7 +78,7 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper Akurat: Deteksi Otomatis Workspace & Project dari segala sisi API Railway
+// Helper Ambil Workspace Asli & Project Nyata
 async function fetchFullAccountData(headers) {
   let wsId = null;
   let wsName = 'Personal Workspace';
@@ -86,38 +86,7 @@ async function fetchFullAccountData(headers) {
   let userName = 'User';
   let projects = [];
 
-  // Query Profil Utama & Projects
-  try {
-    const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query {
-        me {
-          id
-          name
-          email
-          projects {
-            edges {
-              node {
-                id
-                name
-                createdAt
-              }
-            }
-          }
-        }
-      }`
-    }, { headers });
-
-    const me = resMe.data?.data?.me;
-    if (me) {
-      userName = me.name || userName;
-      email = me.email || email;
-      if (me.projects?.edges) {
-        projects = me.projects.edges.map(e => e.node);
-      }
-    }
-  } catch (e) {}
-
-  // Query Workspaces Root
+  // 1. Ambil Workspaces Asli (Railway GraphQL v2)
   try {
     const resWs = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
@@ -140,15 +109,48 @@ async function fetchFullAccountData(headers) {
     const wsList = resWs.data?.data?.workspaces;
     if (wsList && wsList.length > 0) {
       wsId = wsList[0].id;
-      wsName = wsList[0].name;
+      wsName = wsList[0].name || wsName;
       if (wsList[0].projects?.edges) {
-        const wsProjects = wsList[0].projects.edges.map(e => e.node);
-        const map = new Map();
-        [...projects, ...wsProjects].forEach(item => map.set(item.id, item));
-        projects = Array.from(map.values());
+        projects = wsList[0].projects.edges.map(e => e.node);
       }
     }
   } catch (e) {}
+
+  // 2. Data User
+  try {
+    const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
+      query: `query { me { id name email } }`
+    }, { headers });
+    const me = resMe.data?.data?.me;
+    if (me) {
+      userName = me.name || userName;
+      email = me.email || email;
+    }
+  } catch (e) {}
+
+  // 3. Fallback Projects jika dari workspaces kosong
+  if (projects.length === 0) {
+    try {
+      const resP = await axios.post('https://backboard.railway.app/graphql/v2', {
+        query: `query {
+          me {
+            projects {
+              edges {
+                node {
+                  id
+                  name
+                }
+              }
+            }
+          }
+        }`
+      }, { headers });
+      const edges = resP.data?.data?.me?.projects?.edges;
+      if (edges && Array.isArray(edges)) {
+        projects = edges.map(e => e.node);
+      }
+    } catch (e) {}
+  }
 
   return { wsId, wsName, email, userName, projects };
 }
@@ -213,7 +215,7 @@ bot.on('message', async (msg) => {
       report += `👤 *Nama Akun*   : \`${acc.userName}\`\n`;
       report += `📧 *Email Akun*  : \`${acc.email}\`\n`;
       report += `🏢 *Workspace*   : \`${acc.wsName}\`\n`;
-      report += `🆔 *Workspace ID*: \`${acc.wsId || 'Personal Account'}\`\n`;
+      report += `🆔 *Workspace ID*: \`${acc.wsId || 'Tidak Ada (Akun Personal)'}\`\n`;
       report += `━━━━━━━━━━━━━━━━━━━━━\n`;
       report += `📦 *Project Aktif (${totalProjects}):*\n\n`;
 
@@ -225,7 +227,7 @@ bot.on('message', async (msg) => {
           report += `*${idx + 1}. ${p.name}*\n`;
           report += `   ↳ ID: \`${p.id}\`\n`;
         });
-        report += `\n⚠️️ *Catatan:* Hapus project lama via menu *❌ Hapus VPS* jika ingin membuat VPS baru.`;
+        report += `\n⚠️ *Catatan:* Hapus project lama via menu *❌ Hapus VPS* jika ingin membuat VPS baru.`;
       }
 
       await bot.editMessageText(report, {
@@ -239,7 +241,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS 1x Eksekusi Langsung Sukses
+  // Buat VPS 1x Langsung Berhasil
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -253,72 +255,57 @@ bot.on('message', async (msg) => {
     try {
       const acc = await fetchFullAccountData(headers);
 
-      // Siapkan payload projectCreate fleksibel
-      let inputData = { name: `vps-${id}` };
-      if (acc.wsId) {
-        inputData.workspaceId = acc.wsId;
+      // 1. Eksekusi Pembuatan Project Cerdas (Anti-Error Workspace not found)
+      let resP = null;
+      let finalWsId = acc.wsId;
+
+      if (finalWsId) {
+        // Coba gunakan workspaceId yang benar-benar didapat dari Railway
+        try {
+          resP = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation($input: ProjectCreateInput!) {
+              projectCreate(input: $input) {
+                id
+                environments {
+                  edges {
+                    node {
+                      id
+                    }
+                  }
+                }
+              }
+            }`,
+            variables: {
+              input: {
+                name: `vps-${id}`,
+                workspaceId: finalWsId
+              }
+            }
+          }, { headers });
+        } catch (e) {}
       }
 
-      let resP = await axios.post('https://backboard.railway.app/graphql/v2', {
-        query: `mutation($input: ProjectCreateInput!) {
-          projectCreate(input: $input) {
-            id
-            environments {
-              edges {
-                node {
-                  id
+      // Jika gagal atau jika workspaceId tadi ditolak, buat tanpa workspaceId
+      if (!resP || resP.data?.errors) {
+        resP = await axios.post('https://backboard.railway.app/graphql/v2', {
+          query: `mutation {
+            projectCreate(input: { name: "vps-${id}" }) {
+              id
+              environments {
+                edges {
+                  node {
+                    id
+                  }
                 }
               }
             }
-          }
-        }`,
-        variables: { input: inputData }
-      }, { headers });
-
-      // Jika Railway menolak karena workspaceId tidak boleh atau wajib, otomatis fallback
-      if (resP.data.errors) {
-        const errTxt = resP.data.errors[0]?.message || '';
-        if (errTxt.includes('workspaceId') && !inputData.workspaceId) {
-          // Ambil ID profil jika workspaceId wajib
-          const resMe = await axios.post('https://backboard.railway.app/graphql/v2', { query: `query { me { id } }` }, { headers });
-          const myId = resMe.data?.data?.me?.id;
-          inputData.workspaceId = myId;
-          resP = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `mutation($input: ProjectCreateInput!) {
-              projectCreate(input: $input) {
-                id
-                environments {
-                  edges {
-                    node {
-                      id
-                    }
-                  }
-                }
-              }
-            }`,
-            variables: { input: inputData }
-          }, { headers });
-        } else if (errTxt.includes('Workspace not found')) {
-          delete inputData.workspaceId;
-          resP = await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `mutation($input: ProjectCreateInput!) {
-              projectCreate(input: $input) {
-                id
-                environments {
-                  edges {
-                    node {
-                      id
-                    }
-                  }
-                }
-              }
-            }`,
-            variables: { input: inputData }
-          }, { headers });
-        }
+          }`
+        }, { headers });
       }
 
-      if (resP.data.errors) throw new Error(resP.data.errors[0].message);
+      if (resP.data.errors) {
+        throw new Error(resP.data.errors[0].message);
+      }
 
       const pData = resP.data.data.projectCreate;
       createdProjectId = pData.id;
