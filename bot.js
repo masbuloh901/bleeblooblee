@@ -78,7 +78,7 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper Akurat: Ambil Workspace ID & Daftar Project
+// Helper Akurat: Deteksi Otomatis Workspace & Project dari segala sisi API Railway
 async function fetchFullAccountData(headers) {
   let wsId = null;
   let wsName = 'Personal Workspace';
@@ -86,7 +86,38 @@ async function fetchFullAccountData(headers) {
   let userName = 'User';
   let projects = [];
 
-  // Query 1: workspaces (Skema Resmi GraphQL Railway)
+  // Query Profil Utama & Projects
+  try {
+    const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
+      query: `query {
+        me {
+          id
+          name
+          email
+          projects {
+            edges {
+              node {
+                id
+                name
+                createdAt
+              }
+            }
+          }
+        }
+      }`
+    }, { headers });
+
+    const me = resMe.data?.data?.me;
+    if (me) {
+      userName = me.name || userName;
+      email = me.email || email;
+      if (me.projects?.edges) {
+        projects = me.projects.edges.map(e => e.node);
+      }
+    }
+  } catch (e) {}
+
+  // Query Workspaces Root
   try {
     const resWs = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
@@ -111,35 +142,13 @@ async function fetchFullAccountData(headers) {
       wsId = wsList[0].id;
       wsName = wsList[0].name;
       if (wsList[0].projects?.edges) {
-        projects = wsList[0].projects.edges.map(e => e.node);
+        const wsProjects = wsList[0].projects.edges.map(e => e.node);
+        const map = new Map();
+        [...projects, ...wsProjects].forEach(item => map.set(item.id, item));
+        projects = Array.from(map.values());
       }
     }
   } catch (e) {}
-
-  // Query 2: Data User
-  try {
-    const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query { me { id name email } }`
-    }, { headers });
-    const me = resMe.data?.data?.me;
-    if (me) {
-      userName = me.name || userName;
-      email = me.email || email;
-    }
-  } catch (e) {}
-
-  // Query 3: projects root fallback
-  if (projects.length === 0) {
-    try {
-      const resP = await axios.post('https://backboard.railway.app/graphql/v2', {
-        query: `query { projects { edges { node { id name createdAt } } } }`
-      }, { headers });
-      const edges = resP.data?.data?.projects?.edges;
-      if (edges && Array.isArray(edges)) {
-        projects = edges.map(e => e.node);
-      }
-    } catch (e) {}
-  }
 
   return { wsId, wsName, email, userName, projects };
 }
@@ -204,9 +213,9 @@ bot.on('message', async (msg) => {
       report += `👤 *Nama Akun*   : \`${acc.userName}\`\n`;
       report += `📧 *Email Akun*  : \`${acc.email}\`\n`;
       report += `🏢 *Workspace*   : \`${acc.wsName}\`\n`;
-      report += `🆔 *Workspace ID*: \`${acc.wsId || 'Belum Diinisialisasi'}\`\n`;
+      report += `🆔 *Workspace ID*: \`${acc.wsId || 'Personal Account'}\`\n`;
       report += `━━━━━━━━━━━━━━━━━━━━━\n`;
-      report += `📦 *Project Aktif (${totalProjects}/3):*\n\n`;
+      report += `📦 *Project Aktif (${totalProjects}):*\n\n`;
 
       if (totalProjects === 0) {
         report += `_Tidak ada project berjalan (No Project - Bersih)_\n\n`;
@@ -215,9 +224,8 @@ bot.on('message', async (msg) => {
         acc.projects.forEach((p, idx) => {
           report += `*${idx + 1}. ${p.name}*\n`;
           report += `   ↳ ID: \`${p.id}\`\n`;
-          if (p.createdAt) report += `   ↳ Dibuat: \`${p.createdAt.split('T')[0]}\`\n`;
         });
-        report += `\n⚠️ *Catatan:* Untuk membuat VPS baru, pastikan slot project kosong (hapus project lama via menu *❌ Hapus VPS*).`;
+        report += `\n⚠️️ *Catatan:* Hapus project lama via menu *❌ Hapus VPS* jika ingin membuat VPS baru.`;
       }
 
       await bot.editMessageText(report, {
@@ -231,32 +239,27 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS 1x Langsung Berhasil (Semua Bot yang Urus)
+  // Buat VPS 1x Eksekusi Langsung Sukses
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
     const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
     const pass = genPass();
 
-    const statusMsg = await bot.sendMessage(id, '⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 1/5:* Mengambil Workspace ID akun...', { parse_mode: 'Markdown' });
+    const statusMsg = await bot.sendMessage(id, '⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 1/5:* Menginisialisasi project di Railway...', { parse_mode: 'Markdown' });
 
     let createdProjectId = null;
 
     try {
-      // 1. Ambil Workspace ID
       const acc = await fetchFullAccountData(headers);
-      if (!acc.wsId) {
-        throw new Error('Workspace ID tidak ditemukan. Pastikan akun Railway kamu memiliki 1 workspace aktif di https://railway.com');
+
+      // Siapkan payload projectCreate fleksibel
+      let inputData = { name: `vps-${id}` };
+      if (acc.wsId) {
+        inputData.workspaceId = acc.wsId;
       }
 
-      // 2. Buat Project Baru
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 2/5:* Membuat project baru di workspace Railway...', {
-        chat_id: id,
-        message_id: statusMsg.message_id,
-        parse_mode: 'Markdown'
-      });
-
-      const qP = {
+      let resP = await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($input: ProjectCreateInput!) {
           projectCreate(input: $input) {
             id
@@ -269,23 +272,60 @@ bot.on('message', async (msg) => {
             }
           }
         }`,
-        variables: {
-          input: {
-            name: `vps-${id}`,
-            workspaceId: acc.wsId
-          }
-        }
-      };
+        variables: { input: inputData }
+      }, { headers });
 
-      const resP = await axios.post('https://backboard.railway.app/graphql/v2', qP, { headers });
+      // Jika Railway menolak karena workspaceId tidak boleh atau wajib, otomatis fallback
+      if (resP.data.errors) {
+        const errTxt = resP.data.errors[0]?.message || '';
+        if (errTxt.includes('workspaceId') && !inputData.workspaceId) {
+          // Ambil ID profil jika workspaceId wajib
+          const resMe = await axios.post('https://backboard.railway.app/graphql/v2', { query: `query { me { id } }` }, { headers });
+          const myId = resMe.data?.data?.me?.id;
+          inputData.workspaceId = myId;
+          resP = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation($input: ProjectCreateInput!) {
+              projectCreate(input: $input) {
+                id
+                environments {
+                  edges {
+                    node {
+                      id
+                    }
+                  }
+                }
+              }
+            }`,
+            variables: { input: inputData }
+          }, { headers });
+        } else if (errTxt.includes('Workspace not found')) {
+          delete inputData.workspaceId;
+          resP = await axios.post('https://backboard.railway.app/graphql/v2', {
+            query: `mutation($input: ProjectCreateInput!) {
+              projectCreate(input: $input) {
+                id
+                environments {
+                  edges {
+                    node {
+                      id
+                    }
+                  }
+                }
+              }
+            }`,
+            variables: { input: inputData }
+          }, { headers });
+        }
+      }
+
       if (resP.data.errors) throw new Error(resP.data.errors[0].message);
 
       const pData = resP.data.data.projectCreate;
       createdProjectId = pData.id;
       const envId = pData.environments.edges[0]?.node?.id;
 
-      // 3. Pasang Container Ubuntu 22 & SSH Daemon
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 3/5:* Memasang Docker OS Ubuntu 22.04 & SSH Daemon...', {
+      // 2. Pasang Container Ubuntu 22.04 LTS
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 2/5:* Memasang Docker container Ubuntu 22.04...', {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -306,7 +346,13 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // Set Password root
+      // 3. Konfigurasi Password Root
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 3/5:* Menginjeksi kredensial root password...', {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
+
       if (envId) {
         await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation {
@@ -321,7 +367,7 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // Kunci startCommand foreground agar SSH daemon aktif dan container tidak pernah mati
+      // Kunci startCommand foreground agar SSH daemon aktif dan container stabil
       const startCmd = `/bin/sh -c "echo 'root:${pass}' | chpasswd && mkdir -p /var/run/sshd && /usr/sbin/sshd -D || (service ssh restart && tail -f /dev/null)"`;
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -368,14 +414,14 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Finalisasi Booting (14 detik)
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 5/5:* Menunggu container boot & verifikasi akses SSH...', {
+      // 5. Finalisasi Booting (13 detik)
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 5/5:* Menunggu container boot & verifikasi jaringan SSH...', {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
       });
 
-      await sleep(14000);
+      await sleep(13000);
 
       db.vps[id] = { projectId: createdProjectId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
@@ -410,10 +456,10 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Hapus VPS Berbasis Pilihan Tombol (Interactive Inline Keyboard)
+  // Hapus VPS Berbasis Tombol Inline
   if (text === '❌ Hapus VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
-    const waitMsg = await bot.sendMessage(id, '🔍 Mencari daftar project VPS yang aktif di akun Railway...');
+    const waitMsg = await bot.sendMessage(id, '🔍 Mencari project VPS yang aktif di akun Railway...');
     try {
       const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
       const headers = { Authorization: 'Bearer ' + tk, 'Content-Type': 'application/json' };
@@ -449,7 +495,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Admin Features
+  // Fitur Admin
   if (text === '👑 Admin: List User' && Number(id) === ADMIN_ID) {
     const u = Object.values(db.users);
     let r = '📋 Total: ' + u.length + ' user\n\n';
