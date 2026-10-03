@@ -42,6 +42,7 @@ function getMenu(id) {
   return { reply_markup: { keyboard: k, resize_keyboard: true } };
 }
 
+// Tutorial Lengkap & Detail saat /start
 bot.onText(/\/start/, async (msg) => {
   const id = msg.chat.id;
   const db = loadDB();
@@ -57,12 +58,42 @@ bot.onText(/\/start/, async (msg) => {
     await bot.sendSticker(id, 'CAACAgIAAxkBAAEK1eJl3X6-jG9N_z-1v4u8cZqNqQABWgACDAEAAlA-TQtgG9JgR-L2XDAE');
   } catch (e) {}
 
-  let t = '👋 *Railway Cloud VPS Creator Bot*\n\n';
-  t += '📖 *Panduan Praktis:*\n';
-  t += '1. Masukkan token Railway via menu *➕ Add Token Railway*.\n';
-  t += '2. Klik *🔍 Cek Token* untuk info akun & list project realtime.\n';
-  t += '3. Tekan *🚀 Buat VPS* — bot otomatis deploy Ubuntu 22.04 LTS resmi, menyetel SSH, dan melakukan verifikasi port live.\n';
-  t += '4. Ingin menghapus? Klik *❌ Hapus VPS* lalu pilih project via tombol interaktif.\n';
+  let t = '👋 *Selamat Datang di Railway VPS Creator Bot!*\n';
+  t += 'Bot ini memungkinkan kamu membuat VPS Ubuntu 22.04 LTS gratis berbasis cloud Railway secara otomatis.\n\n';
+  t += '━━━━━━━━━━━━━━━━━━━━━\n';
+  t += '📖 *TUTORIAL LENGKAP PENGGUNAAN:*\n';
+  t += '━━━━━━━━━━━━━━━━━━━━━\n\n';
+  t += '*1️⃣ Cara Mendapatkan Token Railway:*\n';
+  t += '• Buka browser kamu dan login ke https://railway.com\n';
+  t += '• Masuk ke menu token: https://railway.com/account/tokens\n';
+  t += '• Klik tombol *Create New Token*, beri nama bebas, lalu salin tokennya (berupa kode unik panjang).\n\n';
+  t += '*2️⃣ Memasukkan Token ke Bot:*\n';
+  t += '• Klik menu *➕ Add Token Railway* pada tombol di bawah.\n';
+  t += '• Tempel/kirim token Railway yang sudah kamu salin.\n\n';
+  t += '*3️⃣ Memeriksa Akun (Wajib Cek):*\n';
+  t += '• Klik tombol *🔍 Cek Token*.\n';
+  t += '• Pastikan data akun, workspace, dan status project muncul.\n';
+  t += '• Pastikan slot project bersih (*0/3 Project*) agar tidak gagal saat deploy.\n\n';
+  t += '*4️⃣ Membuat VPS Ubuntu 22.04:*\n';
+  t += '• Tekan tombol *🚀 Buat VPS*.\n';
+  t += '• Bot akan otomatis mengunduh OS Ubuntu 22.04 resmi, memasang OpenSSH, membuka TCP Proxy port 22, dan menguji koneksi port.\n';
+  t += '• Tunggu sekitar 30–45 detik sampai kredensial (IP, Port SSH, User, Password) dikirimkan.\n\n';
+  t += '*5️⃣ Cara Login ke VPS:*\n';
+  t += '📱 *Di HP (Menggunakan Termux / JuiceSSH):*\n';
+  t += '• Buka Termux, ketik perintah:\n';
+  t += '  `ssh root@IP_ADDRESS -p PORT`\n';
+  t += '• Ketik *yes* jika muncul konfirmasi sidik jari SSH.\n';
+  t += '• Masukkan password yang diberikan (huruf password memang tidak terlihat saat diketik di terminal, langsung tekan Enter).\n\n';
+  t += '💻 *Di PC / Laptop (CMD / PowerShell / PuTTY):*\n';
+  t += '• Buka Command Prompt (CMD) atau PowerShell.\n';
+  t += '• Ketik perintah login yang sama:\n';
+  t += '  `ssh root@IP_ADDRESS -p PORT`\n';
+  t += '• Masukkan password lalu tekan Enter.\n\n';
+  t += '*6️⃣ Menghapus VPS:*\n';
+  t += '• Jika kuota habis atau ingin membuat baru, klik tombol *❌ Hapus VPS*.\n';
+  t += '• Pilih tombol project yang ingin dihapus untuk membersihkannya seketika.\n';
+  t += '━━━━━━━━━━━━━━━━━━━━━';
+
   bot.sendMessage(id, t, { parse_mode: 'Markdown', ...getMenu(id) });
 });
 
@@ -87,7 +118,7 @@ async function fetchFullAccountData(headers, userId = null) {
   let userName = 'User';
   let projectsMap = new Map();
 
-  // 1. Ambil Profil & Workspace ID (Query Bersih)
+  // 1. Ambil Profil & Workspace ID (Query Bersih & Valid)
   try {
     const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
@@ -165,7 +196,7 @@ async function fetchFullAccountData(headers, userId = null) {
 
   const activeProjects = Array.from(projectsMap.values());
 
-  // 4. Sinkronkan dengan Database Lokal (Hapus cache jika di web sudah terhapus)
+  // 4. Sinkronkan dengan Database Lokal (Otomatis bersihkan cache jika di web sudah terhapus)
   if (userId) {
     const db = loadDB();
     if (db.vps[userId]) {
@@ -180,8 +211,8 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
-// Fungsi Verifikasi SSH Port Live (Memastikan SSH Server Sudah Siap Menerima Koneksi)
-function verifySshLive(host, port, timeoutMs = 60000) {
+// Fungsi Verifikasi SSH Port Live (Probe Banner SSH-2.0 secara Nyata)
+function verifySshLive(host, port, timeoutMs = 70000) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     const probe = () => {
@@ -198,10 +229,6 @@ function verifySshLive(host, port, timeoutMs = 60000) {
         }
       });
 
-      sock.on('connect', () => {
-        // Terhubung ke TCP proxy, menunggu banner SSH
-      });
-
       sock.on('timeout', () => {
         sock.destroy();
         setTimeout(probe, 2500);
@@ -214,7 +241,9 @@ function verifySshLive(host, port, timeoutMs = 60000) {
 
       sock.connect(port, host);
     };
-    probe();
+
+    // Beri jeda 15 detik awal agar apt-get selesai menginstal OpenSSH
+    setTimeout(probe, 15000);
   });
 }
 
@@ -247,7 +276,7 @@ bot.on('message', async (msg) => {
 
   if (text === '➕ Add Token Railway') {
     state[id] = 'WAITING_TOKEN';
-    return bot.sendMessage(id, 'Silakan kirim token Railway API Anda:');
+    return bot.sendMessage(id, 'Silakan kirim token Railway API Anda:\nContoh: `a13acdd3-xxxx-xxxx-xxxx-xxxxxxxxxxxx`');
   }
 
   if (text === '🗑️ Hapus Token') {
@@ -304,7 +333,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS: 1x Eksekusi Langsung Aktif & Terverifikasi
+  // Buat VPS: 1x Eksekusi Langsung Aktif & Anti-Crash
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -367,8 +396,8 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Konfigurasi Password Root & Start Command SSH
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & kredensial root...', {
+      // 3. Konfigurasi Password Root & Start Command SSH Anti-Crash
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & menyetel kestabilan container...', {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -388,8 +417,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // Start command anti-failed: perbaikan izin root, PAM login fix, dan foreground sshd
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update && apt-get install -y openssh-server curl sudo; mkdir -p /var/run/sshd /run/sshd; echo 'root:${pass}' | chpasswd; sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; sed -i 's@session\\\\s*required\\\\s*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd; ssh-keygen -A; /usr/sbin/sshd -D -e"`;
+      // Start command anti-crash: install openssh, fix pam, set password, restart service ssh, dan tail -f /dev/null agar PID 1 hidup selamanya
+      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y openssh-server && mkdir -p /run/sshd /var/run/sshd && rm -f /etc/ssh/sshd_config.d/* && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && sed -i 's@session.*required.*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd && ssh-keygen -A && echo 'root:${pass}' | chpasswd && service ssh restart && tail -f /dev/null"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -398,7 +427,10 @@ bot.on('message', async (msg) => {
         variables: {
           serviceId: sId,
           environmentId: envId,
-          input: { startCommand: startCmd }
+          input: {
+            startCommand: startCmd,
+            healthcheckPath: null
+          }
         }
       }, { headers }).catch(() => {});
 
@@ -436,7 +468,7 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Trigger Redeploy Resmi dengan startCommand yang baru
+      // 5. Trigger Redeploy Resmi dengan startCommand yang Baru
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
@@ -455,18 +487,14 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // 6. Verifikasi Port SSH Live (Probe Socket hingga OpenSSH aktif)
-      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 5/5:* Menunggu instalasi OpenSSH & memastikan port SSH live (100% siap)...', {
+      // 6. Verifikasi Port SSH Live (Probe Socket Nyata sampai Server SSH Aktif)
+      await bot.editMessageText('⏳ *Sedang Menyiapkan VPS...*\n📍 *Tahap 5/5:* Menyiapkan paket OpenSSH & menunggu koneksi port SSH live...', {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
       });
 
-      // Probe port sampai SSH banner merespons (maksimal 75 detik)
-      const isOnline = await verifySshLive(resolvedIp, port, 75000);
-      if (!isOnline) {
-        await sleep(15000); // Toleransi jika jaringan ISP lambat merespons banner
-      }
+      await verifySshLive(resolvedIp, port, 70000);
 
       db.vps[id] = { projectId: createdProjectId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
@@ -478,7 +506,8 @@ bot.on('message', async (msg) => {
       info += '👤 *Username   :* `root`\n';
       info += '🔑 *Password   :* `' + pass + '`\n';
       info += '━━━━━━━━━━━━━━━━━━━━━\n';
-      info += '📌 *Format Login SSH:* \n`ssh root@' + resolvedIp + ' -p ' + port + '`';
+      info += '📌 *Format Login SSH:* \n`ssh root@' + resolvedIp + ' -p ' + port + '`\n\n';
+      info += '💡 *Panduan Login:* Buka Termux di HP atau CMD di PC, salin teks format login di atas lalu masukkan password.';
 
       await bot.editMessageText(info, {
         chat_id: id,
