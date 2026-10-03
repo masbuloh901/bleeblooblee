@@ -110,7 +110,6 @@ bot.onText(/\/user/, (msg) => {
   bot.sendMessage(id, r, { parse_mode: 'Markdown' });
 });
 
-// Helper Ambil Workspace & Semua Proyek Live dari Railway
 async function fetchFullAccountData(headers, userId = null) {
   let wsId = null;
   let wsName = 'My Projects';
@@ -121,15 +120,7 @@ async function fetchFullAccountData(headers, userId = null) {
   try {
     const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
-        me {
-          id
-          name
-          email
-          workspaces {
-            id
-            name
-          }
-        }
+        me { id name email workspaces { id name } }
       }`
     }, { headers });
 
@@ -148,15 +139,7 @@ async function fetchFullAccountData(headers, userId = null) {
     try {
       const resWsP = await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `query($workspaceId: String!) {
-          projects(workspaceId: $workspaceId) {
-            edges {
-              node {
-                id
-                name
-                createdAt
-              }
-            }
-          }
+          projects(workspaceId: $workspaceId) { edges { node { id name createdAt } } }
         }`,
         variables: { workspaceId: wsId }
       }, { headers });
@@ -171,17 +154,7 @@ async function fetchFullAccountData(headers, userId = null) {
 
   try {
     const resP = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query {
-        projects {
-          edges {
-            node {
-              id
-              name
-              createdAt
-            }
-          }
-        }
-      }`
+      query: `query { projects { edges { node { id name createdAt } } } }`
     }, { headers });
     const edges = resP.data?.data?.projects?.edges;
     if (edges && Array.isArray(edges)) {
@@ -207,7 +180,7 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
-// Helper untuk mengambil Console Log & Status Reason dari Railway
+// Helper untuk mengambil Console Log & Status Reason dari Railway yang Disempurnakan
 async function getRailwayLogs(headers, projectId, serviceId, envId) {
   try {
     const qDeploy = {
@@ -218,12 +191,20 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
       }`
     };
     const res = await axios.post('https://backboard.railway.app/graphql/v2', qDeploy, { headers });
+    
+    // Cek apakah ada error dari sisi Railway
+    if (res.data?.errors) {
+      return `[Railway API Error]: ${res.data.errors[0].message}`;
+    }
+
     const node = res.data?.data?.deployments?.edges?.[0]?.node;
     
-    if (!node || !node.id) return "Tidak ada data deployment yang ditemukan di server.";
+    if (!node || !node.id) {
+      return "Status: Container belum sempat melakukan proses instalasi (Gagal Inisialisasi). Kemungkinan layanan cloud lambat merespons.";
+    }
 
     let logText = "";
-    if (node.statusReason) logText += `[Sistem]: ${node.statusReason}\n`;
+    if (node.statusReason) logText += `[Sistem Status]: ${node.statusReason}\n`;
 
     const qLog = {
       query: `query {
@@ -232,23 +213,24 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
         }
       }`
     };
+    
     const resLog = await axios.post('https://backboard.railway.app/graphql/v2', qLog, { headers });
     const logs = resLog.data?.data?.deploymentLogs;
     
     if (logs && logs.length > 0) {
       logText += logs.map(l => l.message).join('\n');
     } else {
-      logText += "[Log Kosong] Container gagal booting atau proses instalasi diblokir sistem Railway.";
+      logText += "[Log Kosong] Container dipaksa berhenti oleh server Railway sebelum proses boot selesai.";
     }
     
     return logText.substring(0, 1000); 
   } catch (e) {
-    return "Gagal menghubungi API log Railway.";
+    return "Gagal API Log: " + (e.response?.data?.errors?.[0]?.message || e.message);
   }
 }
 
-// Fungsi Verifikasi SSH Port Live (Versi Terbaru dengan Fail-Fast Backend Check & Timeout 10 Menit)
-function verifySshLive(host, port, timeoutMs = 600000, onTick = null, checkBackend = null) {
+// Fungsi Verifikasi SSH Port (Toleransi 5 Menit & Langsung Kirim Jika Terhubung)
+function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -291,14 +273,15 @@ function verifySshLive(host, port, timeoutMs = 600000, onTick = null, checkBacke
 
       if (Date.now() - startTime > timeoutMs) {
         clearInterval(interval);
-        return end(false, "Timeout maksimal (10 Menit) terlampaui. Server gagal terhubung.");
+        return end(false, "Timeout maksimal (5 Menit) terlampaui. Server gagal terhubung.");
       }
 
       try {
         const sock = new net.Socket();
-        sock.setTimeout(3000);
+        sock.setTimeout(2500);
 
         sock.on('data', (d) => {
+          // JIKA PORT MERESPONS, LANGSUNG HENTIKAN TIMER DAN KIRIM AKUN!
           if (d.toString().includes('SSH')) {
             clearInterval(interval);
             sock.destroy();
@@ -311,7 +294,7 @@ function verifySshLive(host, port, timeoutMs = 600000, onTick = null, checkBacke
 
         if (port) sock.connect(port, host);
       } catch (e) {
-        // Abaikan error socket
+        // Abaikan error socket (terus mencoba sampai batas 5 menit)
       }
     }, 3000); // Ping port tiap 3 detik
   });
@@ -545,7 +528,7 @@ bot.on('message', async (msg) => {
       }
 
       // 5. Pemicu Deploy Resmi
-      await sleep(3000); // Beri waktu Railway menyinkronkan config dan variabel
+      await sleep(3000); 
 
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -565,12 +548,12 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // 6. Verifikasi Port SSH Live & Deteksi Dini Backend Railway
-      const checkResult = await verifySshLive(dom, port, 600000, 
+      // 6. Verifikasi Port SSH Live & Deteksi Dini Backend Railway (Maks 5 Menit = 300000ms)
+      const checkResult = await verifySshLive(dom, port, 300000, 
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Toleransi: 10 Menit)...\n\n_Mendeteksi status backend Railway otomatis..._`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Toleransi: 5 Menit)...\n\n_Mendeteksi status backend Railway otomatis..._`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
