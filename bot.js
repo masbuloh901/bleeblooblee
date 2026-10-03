@@ -214,8 +214,8 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   }
 }
 
-// PERBAIKAN: Pemisahan UI loop (cepat) dan Socket Loop agar bot responsif detik per detik
-function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBackend = null) {
+// PERBAIKAN: Timeout dihapus (jalan tanpa batas) & UI berjalan murni 1 detik sekali
+function verifySshLive(host, port, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -231,25 +231,22 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
       }
     };
 
-    // 1. UI LOOP (Berjalan setiap 1.5 detik untuk efek realtime tanpa kena blokir API Telegram)
+    // 1. UI LOOP (Update per 1 detik sesuai permintaan)
     uiInterval = setInterval(async () => {
       if (resolved) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       if (onTick) {
-        await onTick(elapsed).catch(() => {}); // catch error jika telegram membatasi rate limit sebentar
+        await onTick(elapsed).catch(() => {}); // Mengabaikan error jika Telegram menahan rate limit
       }
-      
-      if (Date.now() - startTime > timeoutMs) {
-        end(false, "Timeout maksimal (5 Menit) terlampaui. Server gagal merespons SSH.");
-      }
-    }, 1500);
+      // TIDAK ADA BATAS WAKTU (Timeout Dihapus)
+    }, 1000);
 
-    // 2. SOCKET LOOP (Mengecek port secara agresif setiap 2.5 detik)
+    // 2. SOCKET LOOP (Mengecek port secara agresif setiap 2 detik)
     sockInterval = setInterval(() => {
       if (resolved) return;
       try {
         const sock = new net.Socket();
-        sock.setTimeout(2000);
+        sock.setTimeout(1500);
         sock.on('data', (d) => {
           if (d.toString().includes('SSH')) {
             sock.destroy();
@@ -260,9 +257,9 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
         sock.on('error', () => sock.destroy());
         if (port) sock.connect(port, host);
       } catch (e) {}
-    }, 2500);
+    }, 2000);
 
-    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik)
+    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik agar tidak membebani server)
     backendInterval = setInterval(async () => {
       if (resolved || !checkBackend) return;
       try {
@@ -318,7 +315,7 @@ bot.on('message', async (msg) => {
   }
 
   if (text === '🔍 Cek Token') {
-    if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
+    if (!db.tokens[id]) return bot.sendMessage(id, '⚠️️ Anda belum memasukkan token Railway.');
     const waitMsg = await bot.sendMessage(id, '⏳ Mengambil detail akun, workspace, dan status project dari Railway...');
     try {
       const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -443,8 +440,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // PERBAIKAN: Menghapus flag "-qq" agar output apt-get muncul di console log Railway jika gagal. Dan penambahan opsi "-e" pada sshd agar melapor error.
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D -e"`;
+      // PERBAIKAN: Mengganti sed dengan echo append (>>) agar konfigurasi SSH lebih kuat & anti macet
+      const startCmd = `/bin/bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && /usr/sbin/sshd -D"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -516,11 +513,12 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      const checkResult = await verifySshLive(dom, port, 300000, 
+      // PERBAIKAN: Menjalankan verifikasi tanpa batas waktu (sampai nyala)
+      const checkResult = await verifySshLive(dom, port,
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱️️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu proses instalasi package OS Ubuntu (Batas Toleransi: 5 Menit)...\n\n_Pengecekan live berjalan realtime..._`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu proses instalasi package OS Ubuntu (Tanpa Batas Waktu)...\n\n_Pengecekan live berjalan realtime per detik..._`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
@@ -635,7 +633,7 @@ bot.on('message', async (msg) => {
 
       buttons.push([{ text: '❌ Batal', callback_data: 'del_cancel' }]);
 
-      await bot.editMessageText('🗑️️ *Pilih Project VPS yang Ingin Dihapus:*\nKlik salah satu tombol di bawah untuk menghapusnya langsung dari Railway:', {
+      await bot.editMessageText('🗑 *Pilih Project VPS yang Ingin Dihapus:*\nKlik salah satu tombol di bawah untuk menghapusnya langsung dari Railway:', {
         chat_id: id,
         message_id: waitMsg.message_id,
         parse_mode: 'Markdown',
