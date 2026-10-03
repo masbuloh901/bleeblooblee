@@ -205,7 +205,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
     if (logs && logs.length > 0) {
       logText += logs.map(l => l.message).join('\n');
     } else {
-      logText += "[Log Kosong] Container macet total, dipaksa mati oleh Railway sebelum sempat mengeksekusi apapun.";
+      logText += "[Log Kosong] Container macet, dipaksa mati seketika oleh Railway karena masalah internal server.";
     }
     
     return logText.substring(0, 1000); 
@@ -214,7 +214,6 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   }
 }
 
-// 3 Menit (180.000 ms) adalah waktu yang paling optimal, UI update per 2 detik, Tembak Socket per 1.5 detik
 function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
@@ -240,7 +239,7 @@ function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBacke
       }
       
       if (Date.now() - startTime > timeoutMs) {
-        end(false, "Timeout (3 Menit). Proses instalasi macet/berhenti dari pusat server Railway.");
+        end(false, "Timeout (3 Menit). Proses instalasi macet dari pusat server Railway.");
       }
     }, 1000);
 
@@ -417,6 +416,9 @@ bot.on('message', async (msg) => {
       const resS = await axios.post('https://backboard.railway.app/graphql/v2', qS, { headers });
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
+      
+      // PERBAIKAN: Memberi Jeda agar backend Railway tidak overload
+      await sleep(2000);
 
       await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Menginjeksi variabel sistem (USER, PASSWORD)...`, {
         chat_id: id,
@@ -444,8 +446,10 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // PERBAIKAN: Menggunakan bash -c murni. Memulai sshd via service, dan mengunci container agar tidak mati dengan tail -f /dev/null
-      const startCmd = `bash -c "echo '🚀 Memulai Instalasi OS...' && apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config && sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config && echo '✅ Instalasi Selesai, Menjalankan SSHD...' && service ssh start && tail -f /dev/null"`;
+      await sleep(2000);
+
+      // PERBAIKAN TOTAL: Tanpa tanda kutip sekecil apapun di dalam eksekusi agar terbebas dari bug "Silent Crash"
+      const startCmd = `sh -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo root:${pass} | chpasswd && echo PermitRootLogin yes >> /etc/ssh/sshd_config && echo PasswordAuthentication yes >> /etc/ssh/sshd_config && ssh-keygen -A && /usr/sbin/sshd -D -e"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -459,6 +463,8 @@ bot.on('message', async (msg) => {
           }
         }
       }, { headers }).catch(() => {});
+
+      await sleep(2000);
 
       await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 4/5:* Membuka TCP Proxy port 22 & resolve IP numerik...`, {
         chat_id: id,
@@ -497,7 +503,8 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      await sleep(5000); 
+      // PERBAIKAN: Menunggu 4 detik untuk merapikan antrean deploy di server Railway
+      await sleep(4000); 
 
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -517,7 +524,6 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // Verifikasi menggunakan timer maksimal 3 menit agar tidak nunggu percuma jika macet
       const checkResult = await verifySshLive(dom, port, 180000,
         async (curElapsed) => {
           try {
