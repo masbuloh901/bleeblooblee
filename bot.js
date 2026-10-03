@@ -207,6 +207,46 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
+// Helper untuk mengambil Console Log & Status Reason dari Railway
+async function getRailwayLogs(headers, projectId, serviceId, envId) {
+  try {
+    const qDeploy = {
+      query: `query {
+        deployments(input: { projectId: "${projectId}", serviceId: "${serviceId}", environmentId: "${envId}" }, first: 1) {
+          edges { node { id, status, statusReason } }
+        }
+      }`
+    };
+    const res = await axios.post('https://backboard.railway.app/graphql/v2', qDeploy, { headers });
+    const node = res.data?.data?.deployments?.edges?.[0]?.node;
+    
+    if (!node || !node.id) return "Tidak ada data deployment yang ditemukan di server.";
+
+    let logText = "";
+    if (node.statusReason) logText += `[Sistem]: ${node.statusReason}\n`;
+
+    const qLog = {
+      query: `query {
+        deploymentLogs(deploymentId: "${node.id}", limit: 15) {
+          message
+        }
+      }`
+    };
+    const resLog = await axios.post('https://backboard.railway.app/graphql/v2', qLog, { headers });
+    const logs = resLog.data?.data?.deploymentLogs;
+    
+    if (logs && logs.length > 0) {
+      logText += logs.map(l => l.message).join('\n');
+    } else {
+      logText += "[Log Kosong] Container gagal booting atau proses instalasi diblokir sistem Railway.";
+    }
+    
+    return logText.substring(0, 1000); 
+  } catch (e) {
+    return "Gagal menghubungi API log Railway.";
+  }
+}
+
 // Fungsi Verifikasi SSH Port Live (Versi Terbaru dengan Fail-Fast Backend Check & Timeout 10 Menit)
 function verifySshLive(host, port, timeoutMs = 600000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
@@ -562,6 +602,15 @@ bot.on('message', async (msg) => {
 
       // BATALKAN TOTAL jika gagal (timeout / error API)
       if (!isOnline) {
+        
+        // AMBIL CONSOLE LOG SEBELUM PROJECT DIHAPUS
+        await bot.editMessageText(
+          `⏳ *Menyusun Laporan Kegagalan...*\nSedang mengambil console log dari backend Railway...`,
+          { chat_id: id, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
+        ).catch(() => {});
+
+        const errorLogs = await getRailwayLogs(headers, createdProjectId, sId, envId);
+
         if (createdProjectId) {
           try {
             await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -573,7 +622,7 @@ bot.on('message', async (msg) => {
         saveDB(db);
 
         return bot.editMessageText(
-          `❌ *Deploy Gagal:*\n⚠️ *Alasan:* ${failReason}\n\nProyek telah otomatis dibatalkan dan dibersihkan dari akun Railway.`,
+          `❌ *Deploy Gagal:*\n⚠️ *Alasan:* ${failReason}\n\n🖥️ *Console Log Railway Terakhir:*\n\`\`\`\n${errorLogs}\n\`\`\`\n_Proyek telah otomatis dibatalkan dan dibersihkan dari akun._`,
           {
             chat_id: id,
             message_id: statusMsg.message_id,
