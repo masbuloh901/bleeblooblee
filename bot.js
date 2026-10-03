@@ -118,7 +118,6 @@ async function fetchFullAccountData(headers, userId = null) {
   let userName = 'User';
   let projectsMap = new Map();
 
-  // 1. Ambil Profil & Workspace ID
   try {
     const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
@@ -145,7 +144,6 @@ async function fetchFullAccountData(headers, userId = null) {
     }
   } catch (e) {}
 
-  // 2. Ambil Proyek di dalam Workspace Aktif
   if (wsId) {
     try {
       const resWsP = await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -171,7 +169,6 @@ async function fetchFullAccountData(headers, userId = null) {
     } catch (e) {}
   }
 
-  // 3. Fallback Proyek Personal
   try {
     const resP = await axios.post('https://backboard.railway.app/graphql/v2', {
       query: `query {
@@ -196,7 +193,6 @@ async function fetchFullAccountData(headers, userId = null) {
 
   const activeProjects = Array.from(projectsMap.values());
 
-  // 4. Sinkronkan dengan Database Lokal
   if (userId) {
     const db = loadDB();
     if (db.vps[userId]) {
@@ -211,46 +207,73 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
-// Fungsi Verifikasi SSH Port Live
-function verifySshLive(host, port, timeoutMs = 85000, onTick = null) {
+// Fungsi Verifikasi SSH Port Live (Versi Terbaru dengan Fail-Fast Backend Check & Timeout 10 Menit)
+function verifySshLive(host, port, timeoutMs = 600000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
+    let tickCount = 0;
+
+    const end = (status, reason) => {
+      if (!resolved) {
+        resolved = true;
+        resolve({ status, reason });
+      }
+    };
 
     const interval = setInterval(async () => {
+      if (resolved) {
+        clearInterval(interval);
+        return;
+      }
+      tickCount++;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      if (onTick) {
+      
+      // Update pesan ke Telegram tiap 5 detik
+      if (onTick && elapsed % 5 === 0) {
         await onTick(elapsed).catch(() => {});
       }
 
-      if (Date.now() - startTime > timeoutMs) {
-        if (!resolved) {
-          resolved = true;
-          clearInterval(interval);
-          resolve(false);
-        }
-        return;
+      // Pengecekan API Backend Railway tiap 15 detik
+      if (checkBackend && tickCount % 5 === 0) {
+        try {
+          const backendState = await checkBackend();
+          if (backendState === 'FAILED') {
+            clearInterval(interval);
+            return end(false, "Proses *Build* digagalkan oleh sistem Railway. Kemungkinan limitasi akun.");
+          }
+          if (backendState === 'CRASHED') {
+            clearInterval(interval);
+            return end(false, "Container mengalami *Crash*. Railway menghentikan paksa VPS Anda.");
+          }
+        } catch (e) {}
       }
 
-      const sock = new net.Socket();
-      sock.setTimeout(3000);
+      if (Date.now() - startTime > timeoutMs) {
+        clearInterval(interval);
+        return end(false, "Timeout maksimal (10 Menit) terlampaui. Server gagal terhubung.");
+      }
 
-      sock.on('data', (d) => {
-        if (d.toString().includes('SSH')) {
-          if (!resolved) {
-            resolved = true;
+      try {
+        const sock = new net.Socket();
+        sock.setTimeout(3000);
+
+        sock.on('data', (d) => {
+          if (d.toString().includes('SSH')) {
             clearInterval(interval);
             sock.destroy();
-            resolve(true);
+            end(true, "OK");
           }
-        }
-      });
+        });
 
-      sock.on('timeout', () => sock.destroy());
-      sock.on('error', () => sock.destroy());
+        sock.on('timeout', () => sock.destroy());
+        sock.on('error', () => sock.destroy());
 
-      sock.connect(port, host);
-    }, 3000);
+        if (port) sock.connect(port, host);
+      } catch (e) {
+        // Abaikan error socket
+      }
+    }, 3000); // Ping port tiap 3 detik
   });
 }
 
@@ -260,7 +283,6 @@ bot.on('message', async (msg) => {
   if (!text || text.startsWith('/')) return;
   const db = loadDB();
 
-  // Simpan Token
   if (state[id] === 'WAITING_TOKEN') {
     const cleanToken = text.replace(/[\r\n\s\t]+/g, '');
     db.tokens[id] = cleanToken;
@@ -286,7 +308,7 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, 'Silakan kirim token Railway API Anda:\nContoh: `a13acdd3-xxxx-xxxx-xxxx-xxxxxxxxxxxx`');
   }
 
-  if (text === '🗑️️ Hapus Token') {
+  if (text === '🗑️ Hapus Token') {
     delete db.tokens[id];
     saveDB(db);
     return bot.sendMessage(id, '🗑️ Token Railway telah dihapus.');
@@ -298,7 +320,6 @@ bot.on('message', async (msg) => {
     return bot.sendMessage(id, '*Status Profil:*\n- Token: ' + tk + '\n- VPS: ' + vp, { parse_mode: 'Markdown' });
   }
 
-  // Cek Token Real-Time & Detail
   if (text === '🔍 Cek Token') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
     const waitMsg = await bot.sendMessage(id, '⏳ Mengambil detail akun, workspace, dan status project dari Railway...');
@@ -340,7 +361,6 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS: Hitungan Detik [⏱️ Xs] + Variabel Bersih + Verifikasi Ketat
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -376,9 +396,7 @@ bot.on('message', async (msg) => {
         }
       }, { headers });
 
-      if (resP.data.errors) {
-        throw new Error(resP.data.errors[0].message);
-      }
+      if (resP.data.errors) throw new Error(resP.data.errors[0].message);
 
       const pData = resP.data.data.projectCreate;
       createdProjectId = pData.id;
@@ -406,7 +424,7 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Injeksi Variabel Bersih Tanpa Tumpuk (Hanya USER & PASSWORD)
+      // 3. Injeksi Variabel (Ditambah PORT: 22)
       await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Menginjeksi variabel sistem (USER, PASSWORD)...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
@@ -425,14 +443,14 @@ bot.on('message', async (msg) => {
               serviceId: sId,
               variables: {
                 USER: "root",
-                PASSWORD: pass
+                PASSWORD: pass,
+                PORT: "22"
               }
             }
           }
         }, { headers }).catch(() => {});
       }
 
-      // Start command anti-crash: install openssh, set password, jalankan sshd, dan kunci foreground dengan tail -f /dev/null
       const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq; apt-get install -y -qq --no-install-recommends openssh-server; mkdir -p /run/sshd /var/run/sshd; echo 'root:${pass}' | chpasswd; sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config 2>/dev/null; sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config 2>/dev/null; sed -i 's@session.*required.*pam_loginuid.so@session optional pam_loginuid.so@g' /etc/pam.d/sshd 2>/dev/null; ssh-keygen -A 2>/dev/null; /usr/sbin/sshd -D || (service ssh restart && tail -f /dev/null) || tail -f /dev/null"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -474,6 +492,10 @@ bot.on('message', async (msg) => {
       const dom = p.domain || 'roundhouse.proxy.rlwy.net';
       const port = p.proxyPort;
 
+      if (!port) {
+        throw new Error("Railway gagal mengalokasikan Proxy Port. Cek limitasi layanan pada akun Railway Anda.");
+      }
+
       let resolvedIp = dom;
       try {
         const dnsRes = await dns.lookup(dom);
@@ -482,7 +504,9 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Pemicu Deploy Resmi Agar Start Command & Variabel Segera Dijalankan
+      // 5. Pemicu Deploy Resmi
+      await sleep(3000); // Beri waktu Railway menyinkronkan config dan variabel
+
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
@@ -501,21 +525,42 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // 6. Verifikasi Port SSH Live & Console Web (Probe Socket dengan Detik Berjalan)
-      const isOnline = await verifySshLive(dom, port, 85000, async (curElapsed) => {
-        try {
-          await bot.editMessageText(
-            `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Verifikasi console live)...`,
-            {
-              chat_id: id,
-              message_id: statusMsg.message_id,
-              parse_mode: 'Markdown'
-            }
-          );
-        } catch (e) {}
-      });
+      // 6. Verifikasi Port SSH Live & Deteksi Dini Backend Railway
+      const checkResult = await verifySshLive(dom, port, 600000, 
+        async (curElapsed) => {
+          try {
+            await bot.editMessageText(
+              `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Toleransi: 10 Menit)...\n\n_Mendeteksi status backend Railway otomatis..._`,
+              {
+                chat_id: id,
+                message_id: statusMsg.message_id,
+                parse_mode: 'Markdown'
+              }
+            );
+          } catch (e) {}
+        }, 
+        async () => {
+          try {
+            const qStatus = {
+              query: `query {
+                deployments(input: { projectId: "${createdProjectId}", serviceId: "${sId}", environmentId: "${envId}" }, first: 1) {
+                  edges { node { status } }
+                }
+              }`
+            };
+            const resStatus = await axios.post('https://backboard.railway.app/graphql/v2', qStatus, { headers });
+            const node = resStatus.data?.data?.deployments?.edges?.[0]?.node;
+            return node ? node.status : 'UNKNOWN';
+          } catch (err) {
+            return 'UNKNOWN';
+          }
+        }
+      );
 
-      // SYARAT MUTLAK: Jika port SSH / console tidak merespons, BATALKAN TOTAL!
+      const isOnline = checkResult.status;
+      const failReason = checkResult.reason;
+
+      // BATALKAN TOTAL jika gagal (timeout / error API)
       if (!isOnline) {
         if (createdProjectId) {
           try {
@@ -528,7 +573,7 @@ bot.on('message', async (msg) => {
         saveDB(db);
 
         return bot.editMessageText(
-          `❌ *Deploy Gagal:*\nContainer / port SSH tidak terhubung di Railway (Console Web Diskonek).\nProyek telah otomatis dibatalkan dan dibersihkan dari akun Railway.`,
+          `❌ *Deploy Gagal:*\n⚠️ *Alasan:* ${failReason}\n\nProyek telah otomatis dibatalkan dan dibersihkan dari akun Railway.`,
           {
             chat_id: id,
             message_id: statusMsg.message_id,
@@ -537,7 +582,7 @@ bot.on('message', async (msg) => {
         );
       }
 
-      // HANYA JIKA 100% TERHUBUNG DAN BANNER SSH MERESPONS:
+      // HANYA JIKA 100% TERHUBUNG DAN BANNER SSH MERESPONS
       db.vps[id] = { projectId: createdProjectId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
 
@@ -572,7 +617,6 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Hapus VPS Berbasis Tombol Inline
   if (text === '❌ Hapus VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
     const waitMsg = await bot.sendMessage(id, '🔍 Mencari project VPS yang aktif di akun Railway...');
@@ -611,7 +655,6 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Fitur Admin
   if (text === '👑 Admin: List User' && Number(id) === ADMIN_ID) {
     const u = Object.values(db.users);
     let r = '📋 Total: ' + u.length + ' user\n\n';
@@ -627,7 +670,6 @@ bot.on('message', async (msg) => {
   }
 });
 
-// Handler Klik Tombol Hapus VPS (Inline Keyboard)
 bot.on('callback_query', async (query) => {
   const id = query.message.chat.id;
   const msgId = query.message.message_id;
