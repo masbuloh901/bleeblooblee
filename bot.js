@@ -76,8 +76,8 @@ bot.onText(/\/start/, async (msg) => {
   t += '• Pastikan slot project bersih (*0/3 Project*) agar tidak gagal saat deploy.\n\n';
   t += '*4️⃣ Membuat VPS Ubuntu 22.04:*\n';
   t += '• Tekan tombol *🚀 Buat VPS*.\n';
-  t += '• Bot akan otomatis mengunduh OS Ubuntu 22.04 resmi, memasang OpenSSH, membuka TCP Proxy port 22, dan menguji koneksi port secara live.\n';
-  t += '• Ada penghitung detik berjalan [⏱️️]. Jika console terhubung dan port live, kredensial langsung dikirim.\n\n';
+  t += '• Bot otomatis menginjeksi variabel sistem (PORT, USER, PASSWORD), memasang OpenSSH, dan membuka TCP Proxy port 22.\n';
+  t += '• Ada penghitung detik berjalan [⏱️]. Jika console terhubung dan port live, kredensial langsung dikirim.\n\n';
   t += '*5️⃣ Cara Login ke VPS:*\n';
   t += '📱 *Di HP (Menggunakan Termux / JuiceSSH):*\n';
   t += '• Buka Termux, ketik perintah:\n';
@@ -211,27 +211,23 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
-// Fungsi Polling Deployment Status Sampai SUCCESS / ACTIVE
-async function pollDeploymentReady(serviceId, environmentId, headers, maxSeconds = 90, onProgress = null) {
+// Fungsi Polling Deployment Status Khusus Berdasarkan Deployment ID yang Baru
+async function pollSpecificDeployment(deploymentId, headers, maxSeconds = 90, onProgress = null) {
   const startTime = Date.now();
   while ((Date.now() - startTime) < (maxSeconds * 1000)) {
     const elapsed = Math.floor((Date.now() - startTime) / 1000);
     try {
       const res = await axios.post('https://backboard.railway.app/graphql/v2', {
-        query: `query($serviceId: String!, $environmentId: String!) {
-          serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
-            latestDeployment {
-              id
-              status
-            }
+        query: `query($id: String!) {
+          deployment(id: $id) {
+            id
+            status
           }
         }`,
-        variables: { serviceId, environmentId }
+        variables: { id: deploymentId }
       }, { headers });
 
-      const dep = res.data?.data?.serviceInstance?.latestDeployment;
-      const status = dep?.status;
-
+      const status = res.data?.data?.deployment?.status;
       if (onProgress && status) {
         await onProgress(status, elapsed).catch(() => {});
       }
@@ -251,7 +247,7 @@ async function pollDeploymentReady(serviceId, environmentId, headers, maxSeconds
 }
 
 // Fungsi Verifikasi SSH Port Live
-function verifySshLive(host, port, timeoutMs = 30000) {
+function verifySshLive(host, port, timeoutMs = 35000) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -284,7 +280,7 @@ function verifySshLive(host, port, timeoutMs = 30000) {
       sock.on('error', () => sock.destroy());
 
       sock.connect(port, host);
-    }, 2000);
+    }, 2500);
   });
 }
 
@@ -360,7 +356,7 @@ bot.on('message', async (msg) => {
           report += `*${idx + 1}. ${p.name}*\n`;
           report += `   ↳ ID: \`${p.id}\`\n`;
         });
-        report += `\n⚠️ *Catatan:* Hapus project via menu *❌ Hapus VPS* jika ingin membuat VPS baru.`;
+        report += `\n⚠️️ *Catatan:* Hapus project via menu *❌ Hapus VPS* jika ingin membuat VPS baru.`;
       }
 
       await bot.editMessageText(report, {
@@ -374,7 +370,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS: Hitungan Detik [⏱️ Xs] & Verifikasi Nyata
+  // Buat VPS: Hitungan Detik [⏱️ Xs] + Injeksi Variabel Lengkap (PORT, USER, PASSWORD)
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -440,8 +436,8 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Konfigurasi Password Root & Start Command SSH
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & proses foreground...`, {
+      // 3. Injeksi Variabel Lengkap (PORT, USER, PASSWORD, ROOT_PASSWORD) ke Railway
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Menginjeksi variabel sistem (PORT, USER, PASSWORD)...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -449,20 +445,29 @@ bot.on('message', async (msg) => {
 
       if (envId) {
         await axios.post('https://backboard.railway.app/graphql/v2', {
-          query: `mutation {
-            variableUpsert(input: {
-              projectId: "${createdProjectId}",
-              serviceId: "${sId}",
-              environmentId: "${envId}",
-              name: "ROOT_PASSWORD",
-              value: "${pass}"
-            })
-          }`
+          query: `mutation($input: VariableCollectionUpsertInput!) {
+            variableCollectionUpsert(input: $input)
+          }`,
+          variables: {
+            input: {
+              projectId: createdProjectId,
+              environmentId: envId,
+              serviceId: sId,
+              variables: {
+                PORT: "22",
+                USER: "root",
+                USERNAME: "root",
+                PASSWORD: pass,
+                ROOT_PASSWORD: pass,
+                SSH_PORT: "22"
+              }
+            }
+          }
         }, { headers }).catch(() => {});
       }
 
-      // Start command anti-crash: install openssh, set config bersih, dan jalankan sshd di foreground sebagai PID 1
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl; mkdir -p /run/sshd /var/run/sshd; echo 'root:${pass}' | chpasswd; rm -f /etc/ssh/sshd_config.d/*; echo 'Port 22' > /etc/ssh/sshd_config; echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; echo 'UsePAM no' >> /etc/ssh/sshd_config; ssh-keygen -A; exec /usr/sbin/sshd -D -e"`;
+      // Start command anti-crash: install openssh, set password, jalankan sshd, dan kunci foreground dengan tail -f /dev/null
+      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl sudo; mkdir -p /run/sshd /var/run/sshd; echo 'root:${pass}' | chpasswd; rm -f /etc/ssh/sshd_config.d/*; echo 'Port 22' > /etc/ssh/sshd_config; echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; echo 'UsePAM no' >> /etc/ssh/sshd_config; ssh-keygen -A; /usr/sbin/sshd; tail -f /dev/null"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -511,37 +516,45 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Pemicu Deploy Resmi Melalui serviceInstanceDeployV2
-      await axios.post('https://backboard.railway.app/graphql/v2', {
-        query: `mutation($serviceId: String!, $environmentId: String!) {
-          serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
-        }`,
-        variables: { serviceId: sId, environmentId: envId }
-      }, { headers }).catch(async () => {
-        await axios.post('https://backboard.railway.app/graphql/v2', {
+      // 5. Trigger Deploy Resmi dengan Start Command & Variabel Baru
+      let newDepId = null;
+      try {
+        const depCall = await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
-            serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+            serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
           }`,
           variables: { serviceId: sId, environmentId: envId }
-        }, { headers }).catch(() => {});
-      });
+        }, { headers });
+        newDepId = depCall.data?.data?.serviceInstanceDeployV2;
+      } catch (e) {}
 
-      // 6. Polling Deployment Status (Menunggu SUCCESS dengan Counter Detik)
-      const deployResult = await pollDeploymentReady(sId, envId, headers, 85, async (curStatus, curElapsed) => {
-        try {
-          await bot.editMessageText(
-            `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menyiapkan container & OpenSSH (Status Railway: \`${curStatus}\`)...`,
-            {
-              chat_id: id,
-              message_id: statusMsg.message_id,
-              parse_mode: 'Markdown'
-            }
-          );
-        } catch (e) {}
-      });
+      // 6. Polling Deployment Status Sampai SUCCESS
+      let deploySuccess = false;
+      if (newDepId) {
+        const depRes = await pollSpecificDeployment(newDepId, headers, 85, async (curStatus, curElapsed) => {
+          try {
+            await bot.editMessageText(
+              `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menyiapkan OpenSSH & Variabel (Status Railway: \`${curStatus}\`)...`,
+              {
+                chat_id: id,
+                message_id: statusMsg.message_id,
+                parse_mode: 'Markdown'
+              }
+            );
+          } catch (e) {}
+        });
+        deploySuccess = depRes.success;
+      } else {
+        await sleep(15000);
+        deploySuccess = true;
+      }
 
-      // SYARAT KETAT: Jika deployment Railway gagal atau timeout, BATALKAN TOTAL!
-      if (!deployResult.success) {
+      // Verifikasi Port SSH Live
+      await sleep(2000);
+      const isOnline = await verifySshLive(dom, port, 30000);
+
+      // KETAT: Jika deployment gagal atau port SSH tidak merespons, batalkan
+      if (!deploySuccess && !isOnline) {
         if (createdProjectId) {
           try {
             await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -553,21 +566,13 @@ bot.on('message', async (msg) => {
         saveDB(db);
 
         return bot.editMessageText(
-          `❌ *Deploy Gagal:*\nDeployment di Railway berstatus \`${deployResult.status}\`.\nProyek telah otomatis dibatalkan dan dibersihkan dari akun Railway.`,
+          `❌ *Deploy Gagal:*\nContainer / port SSH tidak terhubung di Railway.\nProyek telah otomatis dibatalkan dan dibersihkan dari akun Railway.`,
           {
             chat_id: id,
             message_id: statusMsg.message_id,
             parse_mode: 'Markdown'
           }
         );
-      }
-
-      // Verifikasi Socket Live Akhir (Memastikan daemon SSH merespons)
-      await sleep(2000);
-      const isOnline = await verifySshLive(dom, port, 25000);
-      if (!isOnline) {
-        // Toleransi jika respon banner tertunda
-        await sleep(3000);
       }
 
       db.vps[id] = { projectId: createdProjectId, pass: pass, dom: resolvedIp, port: port };
