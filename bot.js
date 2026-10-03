@@ -212,7 +212,7 @@ async function fetchFullAccountData(headers, userId = null) {
 }
 
 // Fungsi Verifikasi SSH Port Live dengan Timer Real-Time
-function verifySshLive(host, port, timeoutMs = 120000, onTick = null) {
+function verifySshLive(host, port, timeoutMs = 100000, onTick = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -255,7 +255,7 @@ function verifySshLive(host, port, timeoutMs = 120000, onTick = null) {
       });
 
       sock.connect(port, host);
-    }, 3000);
+    }, 2500);
   });
 }
 
@@ -345,7 +345,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS dengan Hitungan Detik Naik [⏱️ Xs] & Verifikasi Nyata
+  // Buat VPS: Hitungan Detik [⏱️ Xs] & Anti-Diskonek
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -411,8 +411,8 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Konfigurasi Password Root & Start Command SSH Foreground Permanen
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & proses foreground...`, {
+      // 3. Konfigurasi Password Root & Start Command SSH
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & menyetel kestabilan container...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -432,8 +432,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // Start command anti-crash: install openssh, set config bersih, dan jalankan sshd sebagai PID 1 di foreground
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl; mkdir -p /run/sshd /var/run/sshd; echo 'root:${pass}' | chpasswd; rm -f /etc/ssh/sshd_config.d/*; echo 'Port 22' > /etc/ssh/sshd_config; echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; echo 'UsePAM no' >> /etc/ssh/sshd_config; ssh-keygen -A; exec /usr/sbin/sshd -D -e"`;
+      // Start command anti-crash: pasang openssh, kill daemon bentrok, jalankan sshd, dan kunci proses dengan tail -f /dev/null
+      const startCmd = `/bin/bash -c "mkdir -p /run/sshd /var/run/sshd; export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl; echo 'root:${pass}' | chpasswd; sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config; sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config; sed -i 's/^#*UsePAM.*/UsePAM no/' /etc/ssh/sshd_config; ssh-keygen -A; (pkill -9 sshd 2>/dev/null || true); /usr/sbin/sshd; tail -f /dev/null"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -482,27 +482,18 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Pemicu Deploy Resmi Menggunakan serviceInstanceRedeploy
+      // 5. Pemicu Deploy Ulang
       try {
-        const resRedeploy = await axios.post('https://backboard.railway.app/graphql/v2', {
+        await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
             serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
           }`,
           variables: { serviceId: sId, environmentId: envId }
         }, { headers });
-
-        if (resRedeploy.data?.errors) {
-          await axios.post('https://backboard.railway.app/graphql/v2', {
-            query: `mutation($serviceId: String!, $environmentId: String!) {
-              serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
-            }`,
-            variables: { serviceId: sId, environmentId: envId }
-          }, { headers });
-        }
       } catch (e) {}
 
       // 6. Verifikasi Port SSH Live & Console Web (Probe Socket dengan Detik Berjalan)
-      const isOnline = await verifySshLive(resolvedIp, port, 120000, async (curElapsed) => {
+      const isOnline = await verifySshLive(dom, port, 100000, async (curElapsed) => {
         try {
           await bot.editMessageText(
             `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Verifikasi console live)...`,
