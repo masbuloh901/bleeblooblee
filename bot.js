@@ -33,7 +33,7 @@ const state = {};
 function getMenu(id) {
   const k = [
     [{ text: '➕ Add Token Railway' }, { text: '🗑️ Hapus Token' }],
-    [{ text: '🔍 Cek Token' }, { text: 'ℹ️️ Cek Status Akun' }],
+    [{ text: '🔍 Cek Token' }, { text: 'ℹ️ Cek Status Akun' }],
     [{ text: '🚀 Buat VPS' }, { text: '❌ Hapus VPS' }]
   ];
   if (Number(id) === ADMIN_ID) {
@@ -188,9 +188,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
       return "Status: Container gagal diinisiasi oleh sistem Railway.";
     }
     
-    // Ambil deployment terbaru
     const node = nodes[0];
-
     let logText = `[Status Container]: ${node.status}\n`;
 
     const qLog = {
@@ -207,7 +205,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
     if (logs && logs.length > 0) {
       logText += logs.map(l => l.message).join('\n');
     } else {
-      logText += "[Log Kosong] Container dipaksa berhenti sebelum proses OS berjalan.";
+      logText += "[Log Kosong] Container macet total, dipaksa mati oleh Railway sebelum sempat mengeksekusi apapun.";
     }
     
     return logText.substring(0, 1000); 
@@ -216,8 +214,8 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   }
 }
 
-// PERBAIKAN TOTAL: Cek koneksi sangat agresif (tiap 1.5 detik), UI update tiap 2 detik, Timeout aman 5 menit.
-function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBackend = null) {
+// 3 Menit (180.000 ms) adalah waktu yang paling optimal, UI update per 2 detik, Tembak Socket per 1.5 detik
+function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -233,7 +231,6 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
       }
     };
 
-    // 1. UI LOOP (Update per 2 detik agar tidak diblokir Telegram API, namun terasa Realtime)
     uiInterval = setInterval(async () => {
       if (resolved) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
@@ -243,11 +240,10 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
       }
       
       if (Date.now() - startTime > timeoutMs) {
-        end(false, "Timeout (5 Menit). Server Railway lambat atau gagal merespons intalasi.");
+        end(false, "Timeout (3 Menit). Proses instalasi macet/berhenti dari pusat server Railway.");
       }
     }, 1000);
 
-    // 2. SOCKET LOOP (BRUTAL CHECK: Mengecek port secara agresif setiap 1.5 detik)
     sockInterval = setInterval(() => {
       if (resolved) return;
       try {
@@ -257,7 +253,7 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
         sock.on('data', (d) => {
           if (d.toString().includes('SSH')) {
             sock.destroy();
-            end(true, "OK"); // VPS SIAP! LANGSUNG KIRIM AKUN DETIK ITU JUGA!
+            end(true, "OK"); 
           }
         });
         
@@ -268,7 +264,6 @@ function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBacke
       } catch (e) {}
     }, 1500);
 
-    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik)
     backendInterval = setInterval(async () => {
       if (resolved || !checkBackend) return;
       try {
@@ -449,8 +444,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // PERBAIKAN TOTAL: Command diubah menjadi sh -c, menggunakan verbose echo, dan mengeksekusi sshd dengan flag -e agar error tertulis di Log Railway.
-      const startCmd = `sh -c "echo '🚀 Memulai Instalasi OS...' && apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config && echo '✅ Instalasi Selesai, Menjalankan SSHD...' && /usr/sbin/sshd -D -e"`;
+      // PERBAIKAN: Menggunakan bash -c murni. Memulai sshd via service, dan mengunci container agar tidak mati dengan tail -f /dev/null
+      const startCmd = `bash -c "echo '🚀 Memulai Instalasi OS...' && apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config && sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config && echo '✅ Instalasi Selesai, Menjalankan SSHD...' && service ssh start && tail -f /dev/null"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -502,7 +497,6 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // JEDA SINKRONISASI DIPERLAMA: Memberi waktu 5 detik agar variabel & command pasti tersimpan di Railway sebelum diredeploy
       await sleep(5000); 
 
       try {
@@ -523,12 +517,12 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // 5 MENIT JARING PENGAMAN: Proses realitanya memakan waktu 2-4 menit di tier gratis. Bot menembak port tiap 1.5 detik dan akan langsung mengirim akun jika terbuka.
-      const checkResult = await verifySshLive(dom, port, 300000,
+      // Verifikasi menggunakan timer maksimal 3 menit agar tidak nunggu percuma jika macet
+      const checkResult = await verifySshLive(dom, port, 180000,
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Memproses Instalasi OS Ubuntu (Batas Toleransi: 5 Menit)...\n\n_Pengecekan live berjalan agresif, akun dikirim seketika saat siap!_`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Memproses Instalasi OS Ubuntu (Batas Toleransi: 3 Menit)...\n\n_Pengecekan berjalan agresif, akun dikirim seketika saat siap!_`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
