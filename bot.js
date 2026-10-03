@@ -196,7 +196,7 @@ async function fetchFullAccountData(headers, userId = null) {
 
   const activeProjects = Array.from(projectsMap.values());
 
-  // 4. Sinkronkan dengan Database Lokal (Hapus cache jika di web sudah terhapus)
+  // 4. Sinkronkan dengan Database Lokal
   if (userId) {
     const db = loadDB();
     if (db.vps[userId]) {
@@ -255,7 +255,7 @@ function verifySshLive(host, port, timeoutMs = 120000, onTick = null) {
       });
 
       sock.connect(port, host);
-    }, 2500);
+    }, 3000);
   });
 }
 
@@ -345,7 +345,7 @@ bot.on('message', async (msg) => {
     }
   }
 
-  // Buat VPS dengan Hitungan Detik Naik [⏱️️ Xs] & Verifikasi Port Nyata
+  // Buat VPS dengan Hitungan Detik Naik [⏱️ Xs] & Verifikasi Nyata
   if (text === '🚀 Buat VPS') {
     if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Masukkan token Railway terlebih dahulu via menu ➕ Add Token Railway.');
     const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -411,8 +411,8 @@ bot.on('message', async (msg) => {
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
 
-      // 3. Konfigurasi Password Root & Start Command SSH Cepat & Anti-Diskonek
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & proses background/foreground...`, {
+      // 3. Konfigurasi Password Root & Start Command SSH Foreground Permanen
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Mengonfigurasi OpenSSH & proses foreground...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -432,8 +432,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // Start command super cepat: --no-install-recommends (5-10 detik), sshd jalan terus, tail -f /dev/null mengunci container agar tidak pernah diskonek
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl && mkdir -p /run/sshd /var/run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && sed -i 's/^#*UsePAM.*/UsePAM no/' /etc/ssh/sshd_config && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && echo 'UsePAM no' >> /etc/ssh/sshd_config && rm -f /etc/ssh/sshd_config.d/* && ssh-keygen -A && /usr/sbin/sshd -D & tail -f /dev/null"`;
+      // Start command anti-crash: install openssh, set config bersih, dan jalankan sshd sebagai PID 1 di foreground
+      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive; apt-get update -qq && apt-get install -y -qq --no-install-recommends openssh-server curl; mkdir -p /run/sshd /var/run/sshd; echo 'root:${pass}' | chpasswd; rm -f /etc/ssh/sshd_config.d/*; echo 'Port 22' > /etc/ssh/sshd_config; echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config; echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config; echo 'UsePAM no' >> /etc/ssh/sshd_config; ssh-keygen -A; exec /usr/sbin/sshd -D -e"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -482,30 +482,30 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // 5. Trigger Deploy Resmi dengan Mutasi Valid Railway
+      // 5. Pemicu Deploy Resmi Menggunakan serviceInstanceRedeploy
       try {
-        await axios.post('https://backboard.railway.app/graphql/v2', {
+        const resRedeploy = await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
-            serviceInstanceDeploy(serviceId: $serviceId, environmentId: $environmentId)
+            serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
           }`,
           variables: { serviceId: sId, environmentId: envId }
         }, { headers });
-      } catch (e) {
-        try {
+
+        if (resRedeploy.data?.errors) {
           await axios.post('https://backboard.railway.app/graphql/v2', {
             query: `mutation($serviceId: String!, $environmentId: String!) {
-              serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+              serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
             }`,
             variables: { serviceId: sId, environmentId: envId }
           }, { headers });
-        } catch (e2) {}
-      }
+        }
+      } catch (e) {}
 
       // 6. Verifikasi Port SSH Live & Console Web (Probe Socket dengan Detik Berjalan)
-      const isOnline = await verifySshLive(resolvedIp, port, 120000, async () => {
+      const isOnline = await verifySshLive(resolvedIp, port, 120000, async (curElapsed) => {
         try {
           await bot.editMessageText(
-            `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Verifikasi console live)...`,
+            `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Verifikasi console live)...`,
             {
               chat_id: id,
               message_id: statusMsg.message_id,
