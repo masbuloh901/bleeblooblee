@@ -214,8 +214,8 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   }
 }
 
-// PERBAIKAN: Timeout dihapus (jalan tanpa batas) & UI berjalan murni 1 detik sekali
-function verifySshLive(host, port, onTick = null, checkBackend = null) {
+// PERBAIKAN: Timeout dikembalikan menjadi 3 Menit (180.000 ms) agar tidak infinite loop
+function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -231,14 +231,18 @@ function verifySshLive(host, port, onTick = null, checkBackend = null) {
       }
     };
 
-    // 1. UI LOOP (Update per 1 detik sesuai permintaan)
+    // 1. UI LOOP (Update per 1 detik)
     uiInterval = setInterval(async () => {
       if (resolved) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
       if (onTick) {
-        await onTick(elapsed).catch(() => {}); // Mengabaikan error jika Telegram menahan rate limit
+        await onTick(elapsed).catch(() => {});
       }
-      // TIDAK ADA BATAS WAKTU (Timeout Dihapus)
+      
+      // JARING PENGAMAN: Jika melebihi 3 menit, batalkan!
+      if (Date.now() - startTime > timeoutMs) {
+        end(false, "Timeout (3 Menit). Instalasi macet/stuck di server Railway.");
+      }
     }, 1000);
 
     // 2. SOCKET LOOP (Mengecek port secara agresif setiap 2 detik)
@@ -259,7 +263,7 @@ function verifySshLive(host, port, onTick = null, checkBackend = null) {
       } catch (e) {}
     }, 2000);
 
-    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik agar tidak membebani server)
+    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik)
     backendInterval = setInterval(async () => {
       if (resolved || !checkBackend) return;
       try {
@@ -315,7 +319,7 @@ bot.on('message', async (msg) => {
   }
 
   if (text === '🔍 Cek Token') {
-    if (!db.tokens[id]) return bot.sendMessage(id, '⚠️️ Anda belum memasukkan token Railway.');
+    if (!db.tokens[id]) return bot.sendMessage(id, '⚠️ Anda belum memasukkan token Railway.');
     const waitMsg = await bot.sendMessage(id, '⏳ Mengambil detail akun, workspace, dan status project dari Railway...');
     try {
       const tk = db.tokens[id].replace(/[\r\n\s\t]+/g, '');
@@ -440,7 +444,6 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // PERBAIKAN: Mengganti sed dengan echo append (>>) agar konfigurasi SSH lebih kuat & anti macet
       const startCmd = `/bin/bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && /usr/sbin/sshd -D"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -513,12 +516,12 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // PERBAIKAN: Menjalankan verifikasi tanpa batas waktu (sampai nyala)
-      const checkResult = await verifySshLive(dom, port,
+      // PERBAIKAN: Parameter diset menjadi 180000ms (3 menit) untuk call verifySshLive
+      const checkResult = await verifySshLive(dom, port, 180000,
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu proses instalasi package OS Ubuntu (Tanpa Batas Waktu)...\n\n_Pengecekan live berjalan realtime per detik..._`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu instalasi package (Batas: 3 Menit)...\n\n_Pengecekan live realtime per detik..._`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
