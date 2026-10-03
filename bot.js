@@ -33,7 +33,7 @@ const state = {};
 function getMenu(id) {
   const k = [
     [{ text: '➕ Add Token Railway' }, { text: '🗑️ Hapus Token' }],
-    [{ text: '🔍 Cek Token' }, { text: 'ℹ️ Cek Status Akun' }],
+    [{ text: '🔍 Cek Token' }, { text: 'ℹ️️ Cek Status Akun' }],
     [{ text: '🚀 Buat VPS' }, { text: '❌ Hapus VPS' }]
   ];
   if (Number(id) === ADMIN_ID) {
@@ -172,7 +172,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   try {
     const qDeploy = {
       query: `query {
-        deployments(input: { projectId: "${projectId}", serviceId: "${serviceId}", environmentId: "${envId}" }, first: 1) {
+        deployments(input: { projectId: "${projectId}", serviceId: "${serviceId}", environmentId: "${envId}" }, first: 5) {
           edges { node { id, status } } 
         }
       }`
@@ -183,17 +183,19 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
       return `[Railway API Error]: ${res.data.errors[0].message}`;
     }
 
-    const node = res.data?.data?.deployments?.edges?.[0]?.node;
-    if (!node || !node.id) {
+    const nodes = res.data?.data?.deployments?.edges?.map(e => e.node) || [];
+    if (nodes.length === 0) {
       return "Status: Container gagal diinisiasi oleh sistem Railway.";
     }
+    
+    // Ambil deployment terbaru
+    const node = nodes[0];
 
-    let logText = "";
-    if (node.status) logText += `[Status Container]: ${node.status}\n`;
+    let logText = `[Status Container]: ${node.status}\n`;
 
     const qLog = {
       query: `query {
-        deploymentLogs(deploymentId: "${node.id}", limit: 20) {
+        deploymentLogs(deploymentId: "${node.id}", limit: 25) {
           message
         }
       }`
@@ -205,7 +207,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
     if (logs && logs.length > 0) {
       logText += logs.map(l => l.message).join('\n');
     } else {
-      logText += "[Log Kosong] Container dipaksa berhenti atau gagal booting.";
+      logText += "[Log Kosong] Container dipaksa berhenti sebelum proses OS berjalan.";
     }
     
     return logText.substring(0, 1000); 
@@ -214,8 +216,8 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
   }
 }
 
-// PERBAIKAN: Timeout dikembalikan menjadi 3 Menit (180.000 ms) agar tidak infinite loop
-function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBackend = null) {
+// PERBAIKAN TOTAL: Cek koneksi sangat agresif (tiap 1.5 detik), UI update tiap 2 detik, Timeout aman 5 menit.
+function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
@@ -231,37 +233,40 @@ function verifySshLive(host, port, timeoutMs = 180000, onTick = null, checkBacke
       }
     };
 
-    // 1. UI LOOP (Update per 1 detik)
+    // 1. UI LOOP (Update per 2 detik agar tidak diblokir Telegram API, namun terasa Realtime)
     uiInterval = setInterval(async () => {
       if (resolved) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
-      if (onTick) {
+      
+      if (onTick && elapsed % 2 === 0) { 
         await onTick(elapsed).catch(() => {});
       }
       
-      // JARING PENGAMAN: Jika melebihi 3 menit, batalkan!
       if (Date.now() - startTime > timeoutMs) {
-        end(false, "Timeout (3 Menit). Instalasi macet/stuck di server Railway.");
+        end(false, "Timeout (5 Menit). Server Railway lambat atau gagal merespons intalasi.");
       }
     }, 1000);
 
-    // 2. SOCKET LOOP (Mengecek port secara agresif setiap 2 detik)
+    // 2. SOCKET LOOP (BRUTAL CHECK: Mengecek port secara agresif setiap 1.5 detik)
     sockInterval = setInterval(() => {
       if (resolved) return;
       try {
         const sock = new net.Socket();
-        sock.setTimeout(1500);
+        sock.setTimeout(1000);
+        
         sock.on('data', (d) => {
           if (d.toString().includes('SSH')) {
             sock.destroy();
-            end(true, "OK"); // LANGSUNG MENGIRIM AKUN JIKA TERHUBUNG
+            end(true, "OK"); // VPS SIAP! LANGSUNG KIRIM AKUN DETIK ITU JUGA!
           }
         });
+        
         sock.on('timeout', () => sock.destroy());
         sock.on('error', () => sock.destroy());
+        
         if (port) sock.connect(port, host);
       } catch (e) {}
-    }, 2000);
+    }, 1500);
 
     // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik)
     backendInterval = setInterval(async () => {
@@ -444,7 +449,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      const startCmd = `/bin/bash -c "apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && echo 'PermitRootLogin yes' >> /etc/ssh/sshd_config && echo 'PasswordAuthentication yes' >> /etc/ssh/sshd_config && /usr/sbin/sshd -D"`;
+      // PERBAIKAN TOTAL: Command diubah menjadi sh -c, menggunakan verbose echo, dan mengeksekusi sshd dengan flag -e agar error tertulis di Log Railway.
+      const startCmd = `sh -c "echo '🚀 Memulai Instalasi OS...' && apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config && echo '✅ Instalasi Selesai, Menjalankan SSHD...' && /usr/sbin/sshd -D -e"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -496,7 +502,8 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      await sleep(3000); 
+      // JEDA SINKRONISASI DIPERLAMA: Memberi waktu 5 detik agar variabel & command pasti tersimpan di Railway sebelum diredeploy
+      await sleep(5000); 
 
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
@@ -516,12 +523,12 @@ bot.on('message', async (msg) => {
         } catch (e2) {}
       }
 
-      // PERBAIKAN: Parameter diset menjadi 180000ms (3 menit) untuk call verifySshLive
-      const checkResult = await verifySshLive(dom, port, 180000,
+      // 5 MENIT JARING PENGAMAN: Proses realitanya memakan waktu 2-4 menit di tier gratis. Bot menembak port tiap 1.5 detik dan akan langsung mengirim akun jika terbuka.
+      const checkResult = await verifySshLive(dom, port, 300000,
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu instalasi package (Batas: 3 Menit)...\n\n_Pengecekan live realtime per detik..._`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Memproses Instalasi OS Ubuntu (Batas Toleransi: 5 Menit)...\n\n_Pengecekan live berjalan agresif, akun dikirim seketika saat siap!_`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
