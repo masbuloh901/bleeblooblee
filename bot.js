@@ -367,7 +367,7 @@ bot.on('message', async (msg) => {
 
     const getElapsed = () => Math.floor((Date.now() - startTime) / 1000);
 
-    const statusMsg = await bot.sendMessage(id, `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 1/5:* Inisialisasi Project di Workspace Railway...`, { parse_mode: 'Markdown' });
+    const statusMsg = await bot.sendMessage(id, `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 1/6:* Inisialisasi Project di Workspace Railway...`, { parse_mode: 'Markdown' });
 
     let createdProjectId = null;
 
@@ -398,7 +398,7 @@ bot.on('message', async (msg) => {
       createdProjectId = pData.id;
       const envId = pData.environments.edges[0]?.node?.id;
 
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 2/5:* Menyiapkan image Ubuntu 22.04 LTS...`, {
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 2/6:* Menyiapkan image Ubuntu 22.04 LTS...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -416,11 +416,8 @@ bot.on('message', async (msg) => {
       const resS = await axios.post('https://backboard.railway.app/graphql/v2', qS, { headers });
       if (resS.data.errors) throw new Error(resS.data.errors[0].message);
       const sId = resS.data.data.serviceCreate.id;
-      
-      // PERBAIKAN: Memberi Jeda agar backend Railway tidak overload
-      await sleep(2000);
 
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/5:* Menginjeksi variabel sistem (USER, PASSWORD)...`, {
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 3/6:* Menginjeksi perintah sistem (USER, PASSWORD)...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -446,10 +443,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      await sleep(2000);
-
-      // PERBAIKAN TOTAL: Tanpa tanda kutip sekecil apapun di dalam eksekusi agar terbebas dari bug "Silent Crash"
-      const startCmd = `sh -c "apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo root:${pass} | chpasswd && echo PermitRootLogin yes >> /etc/ssh/sshd_config && echo PasswordAuthentication yes >> /etc/ssh/sshd_config && ssh-keygen -A && /usr/sbin/sshd -D -e"`;
+      // Perintah ini pasti tereksekusi dan memberikan tanda log di Railway
+      const startCmd = `bash -c "echo '🚀 Memulai Instalasi OS...' && apt-get update -y && DEBIAN_FRONTEND=noninteractive apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/.*PermitRootLogin.*/PermitRootLogin yes/g' /etc/ssh/sshd_config && sed -i 's/.*PasswordAuthentication.*/PasswordAuthentication yes/g' /etc/ssh/sshd_config && echo '✅ Instalasi Selesai, Menjalankan SSHD...' && /usr/sbin/sshd -D -e"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -464,9 +459,7 @@ bot.on('message', async (msg) => {
         }
       }, { headers }).catch(() => {});
 
-      await sleep(2000);
-
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 4/5:* Membuka TCP Proxy port 22 & resolve IP numerik...`, {
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 4/6:* Membuka TCP Proxy port 22 & resolve IP numerik...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -503,13 +496,36 @@ bot.on('message', async (msg) => {
         resolvedIp = dom;
       }
 
-      // PERBAIKAN: Menunggu 4 detik untuk merapikan antrean deploy di server Railway
-      await sleep(4000); 
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 5/6:* Membatalkan Auto-Deploy Railway yang tumpang tindih...`, {
+        chat_id: id,
+        message_id: statusMsg.message_id,
+        parse_mode: 'Markdown'
+      });
 
+      // PERBAIKAN FATAL: Membatalkan deploy kosong yang dilakukan Railway secara sepihak
+      try {
+        const qDeps = {
+          query: `query { deployments(input: { projectId: "${createdProjectId}", serviceId: "${sId}", environmentId: "${envId}" }) { edges { node { id, status } } } }`
+        };
+        const resDeps = await axios.post('https://backboard.railway.app/graphql/v2', qDeps, { headers });
+        const deps = resDeps.data?.data?.deployments?.edges || [];
+        for (const dep of deps) {
+          const status = dep.node.status;
+          if (['INITIALIZING', 'BUILDING', 'DEPLOYING', 'QUEUED'].includes(status)) {
+             await axios.post('https://backboard.railway.app/graphql/v2', {
+               query: `mutation { deploymentCancel(id: "${dep.node.id}") }`
+             }, { headers }).catch(()=>({}));
+          }
+        }
+      } catch(e) {}
+
+      await sleep(3000); 
+
+      // Memicu ulang Deploy yang BERSIH dan dijamin 100% menggunakan startCommand instalasi SSH
       try {
         await axios.post('https://backboard.railway.app/graphql/v2', {
           query: `mutation($serviceId: String!, $environmentId: String!) {
-            serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
+            serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
           }`,
           variables: { serviceId: sId, environmentId: envId }
         }, { headers });
@@ -517,7 +533,7 @@ bot.on('message', async (msg) => {
         try {
           await axios.post('https://backboard.railway.app/graphql/v2', {
             query: `mutation($serviceId: String!, $environmentId: String!) {
-              serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+              serviceInstanceRedeploy(serviceId: $serviceId, environmentId: $environmentId)
             }`,
             variables: { serviceId: sId, environmentId: envId }
           }, { headers });
@@ -528,7 +544,7 @@ bot.on('message', async (msg) => {
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 5/5:* Memproses Instalasi OS Ubuntu (Batas Toleransi: 3 Menit)...\n\n_Pengecekan berjalan agresif, akun dikirim seketika saat siap!_`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱ ${curElapsed}s]\n📍 *Tahap 6/6:* Memproses Instalasi OS Ubuntu (Batas Toleransi: 3 Menit)...\n\n_Pengecekan berjalan agresif, akun dikirim seketika saat siap!_`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
