@@ -42,7 +42,6 @@ function getMenu(id) {
   return { reply_markup: { keyboard: k, resize_keyboard: true } };
 }
 
-// Tutorial Lengkap & Detail saat /start
 bot.onText(/\/start/, async (msg) => {
   const id = msg.chat.id;
   const db = loadDB();
@@ -76,22 +75,15 @@ bot.onText(/\/start/, async (msg) => {
   t += '• Pastikan slot project bersih (*0/3 Project*) agar tidak gagal saat deploy.\n\n';
   t += '*4️⃣ Membuat VPS Ubuntu 22.04:*\n';
   t += '• Tekan tombol *🚀 Buat VPS*.\n';
-  t += '• Bot otomatis menginjeksi variabel sistem (USER, PASSWORD), memasang OpenSSH, dan membuka TCP Proxy port 22.\n';
-  t += '• Ada penghitung detik berjalan [⏱️]. Jika console terhubung dan port live, kredensial langsung dikirim.\n\n';
+  t += '• Bot otomatis menginjeksi variabel sistem, memasang OpenSSH, dan membuka TCP Proxy port 22.\n';
+  t += '• Jika console terhubung dan port live, kredensial langsung dikirim.\n\n';
   t += '*5️⃣ Cara Login ke VPS:*\n';
-  t += '📱 *Di HP (Menggunakan Termux / JuiceSSH):*\n';
-  t += '• Buka Termux, ketik perintah:\n';
+  t += '📱 *Di HP (Termux / JuiceSSH):*\n';
   t += '  `ssh root@IP_ADDRESS -p PORT`\n';
-  t += '• Ketik *yes* jika muncul pertanyaan konfirmasi sidik jari SSH.\n';
-  t += '• Masukkan password yang diberikan (huruf password tidak tampil saat diketik, langsung tekan Enter).\n\n';
-  t += '💻 *Di PC / Laptop (CMD / PowerShell / PuTTY):*\n';
-  t += '• Buka Command Prompt (CMD) atau PowerShell.\n';
-  t += '• Ketik perintah login yang sama:\n';
-  t += '  `ssh root@IP_ADDRESS -p PORT`\n';
-  t += '• Masukkan password lalu tekan Enter.\n\n';
+  t += '💻 *Di PC (CMD / PowerShell):*\n';
+  t += '  `ssh root@IP_ADDRESS -p PORT`\n\n';
   t += '*6️⃣ Menghapus VPS:*\n';
-  t += '• Klik tombol *❌ Hapus VPS*.\n';
-  t += '• Pilih tombol project yang ingin dihapus untuk membersihkannya seketika.\n';
+  t += '• Klik tombol *❌ Hapus VPS* untuk menghapus project.\n';
   t += '━━━━━━━━━━━━━━━━━━━━━';
 
   bot.sendMessage(id, t, { parse_mode: 'Markdown', ...getMenu(id) });
@@ -119,9 +111,7 @@ async function fetchFullAccountData(headers, userId = null) {
 
   try {
     const resMe = await axios.post('https://backboard.railway.app/graphql/v2', {
-      query: `query {
-        me { id name email workspaces { id name } }
-      }`
+      query: `query { me { id name email workspaces { id name } } }`
     }, { headers });
 
     const me = resMe.data?.data?.me;
@@ -138,9 +128,7 @@ async function fetchFullAccountData(headers, userId = null) {
   if (wsId) {
     try {
       const resWsP = await axios.post('https://backboard.railway.app/graphql/v2', {
-        query: `query($workspaceId: String!) {
-          projects(workspaceId: $workspaceId) { edges { node { id name createdAt } } }
-        }`,
+        query: `query($workspaceId: String!) { projects(workspaceId: $workspaceId) { edges { node { id name createdAt } } } }`,
         variables: { workspaceId: wsId }
       }, { headers });
       const edges = resWsP.data?.data?.projects?.edges;
@@ -180,7 +168,6 @@ async function fetchFullAccountData(headers, userId = null) {
   return { wsId, wsName, email, userName, projects: activeProjects };
 }
 
-// PERBAIKAN: Menghapus statusReason yang menyebabkan error GraphQL
 async function getRailwayLogs(headers, projectId, serviceId, envId) {
   try {
     const qDeploy = {
@@ -197,9 +184,8 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
     }
 
     const node = res.data?.data?.deployments?.edges?.[0]?.node;
-    
     if (!node || !node.id) {
-      return "Status: Container belum sempat melakukan proses instalasi (Gagal Inisialisasi). Kemungkinan layanan cloud lambat merespons.";
+      return "Status: Container gagal diinisiasi oleh sistem Railway.";
     }
 
     let logText = "";
@@ -207,7 +193,7 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
 
     const qLog = {
       query: `query {
-        deploymentLogs(deploymentId: "${node.id}", limit: 15) {
+        deploymentLogs(deploymentId: "${node.id}", limit: 20) {
           message
         }
       }`
@@ -219,79 +205,72 @@ async function getRailwayLogs(headers, projectId, serviceId, envId) {
     if (logs && logs.length > 0) {
       logText += logs.map(l => l.message).join('\n');
     } else {
-      logText += "[Log Kosong] Container dipaksa berhenti oleh server Railway sebelum proses boot selesai atau image bermasalah.";
+      logText += "[Log Kosong] Container dipaksa berhenti atau gagal booting.";
     }
     
     return logText.substring(0, 1000); 
   } catch (e) {
-    return "Gagal API Log: " + (e.response?.data?.errors?.[0]?.message || e.message);
+    return "Gagal API Log: " + (e.message);
   }
 }
 
-// Fungsi Verifikasi SSH Port
+// PERBAIKAN: Pemisahan UI loop (cepat) dan Socket Loop agar bot responsif detik per detik
 function verifySshLive(host, port, timeoutMs = 300000, onTick = null, checkBackend = null) {
   const startTime = Date.now();
   return new Promise((resolve) => {
     let resolved = false;
-    let tickCount = 0;
+    let uiInterval, sockInterval, backendInterval;
 
     const end = (status, reason) => {
       if (!resolved) {
         resolved = true;
+        clearInterval(uiInterval);
+        clearInterval(sockInterval);
+        clearInterval(backendInterval);
         resolve({ status, reason });
       }
     };
 
-    const interval = setInterval(async () => {
-      if (resolved) {
-        clearInterval(interval);
-        return;
-      }
-      tickCount++;
+    // 1. UI LOOP (Berjalan setiap 1.5 detik untuk efek realtime tanpa kena blokir API Telegram)
+    uiInterval = setInterval(async () => {
+      if (resolved) return;
       const elapsed = Math.floor((Date.now() - startTime) / 1000);
+      if (onTick) {
+        await onTick(elapsed).catch(() => {}); // catch error jika telegram membatasi rate limit sebentar
+      }
       
-      if (onTick && elapsed % 5 === 0) {
-        await onTick(elapsed).catch(() => {});
-      }
-
-      if (checkBackend && tickCount % 5 === 0) {
-        try {
-          const backendState = await checkBackend();
-          if (backendState === 'FAILED') {
-            clearInterval(interval);
-            return end(false, "Proses *Build* digagalkan oleh sistem Railway. Kemungkinan limitasi akun.");
-          }
-          if (backendState === 'CRASHED') {
-            clearInterval(interval);
-            return end(false, "Container mengalami *Crash*. Railway menghentikan paksa VPS Anda.");
-          }
-        } catch (e) {}
-      }
-
       if (Date.now() - startTime > timeoutMs) {
-        clearInterval(interval);
-        return end(false, "Timeout maksimal (5 Menit) terlampaui. Server gagal terhubung.");
+        end(false, "Timeout maksimal (5 Menit) terlampaui. Server gagal merespons SSH.");
       }
+    }, 1500);
 
+    // 2. SOCKET LOOP (Mengecek port secara agresif setiap 2.5 detik)
+    sockInterval = setInterval(() => {
+      if (resolved) return;
       try {
         const sock = new net.Socket();
-        sock.setTimeout(2500);
-
+        sock.setTimeout(2000);
         sock.on('data', (d) => {
           if (d.toString().includes('SSH')) {
-            clearInterval(interval);
             sock.destroy();
-            end(true, "OK");
+            end(true, "OK"); // LANGSUNG MENGIRIM AKUN JIKA TERHUBUNG
           }
         });
-
         sock.on('timeout', () => sock.destroy());
         sock.on('error', () => sock.destroy());
-
         if (port) sock.connect(port, host);
-      } catch (e) {
-      }
-    }, 3000); 
+      } catch (e) {}
+    }, 2500);
+
+    // 3. BACKEND LOOP (Mengecek API status Railway setiap 15 detik)
+    backendInterval = setInterval(async () => {
+      if (resolved || !checkBackend) return;
+      try {
+        const backendState = await checkBackend();
+        if (backendState === 'FAILED') end(false, "Proses digagalkan oleh sistem Railway.");
+        if (backendState === 'CRASHED') end(false, "Container mengalami Crash/Berhenti Paksa.");
+      } catch (e) {}
+    }, 15000);
   });
 }
 
@@ -419,7 +398,7 @@ bot.on('message', async (msg) => {
       createdProjectId = pData.id;
       const envId = pData.environments.edges[0]?.node?.id;
 
-      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️️ ${getElapsed()}s]\n📍 *Tahap 2/5:* Menyiapkan image Ubuntu 22.04 LTS...`, {
+      await bot.editMessageText(`⏳ *Sedang Menyiapkan VPS...* [⏱️ ${getElapsed()}s]\n📍 *Tahap 2/5:* Menyiapkan image Ubuntu 22.04 LTS...`, {
         chat_id: id,
         message_id: statusMsg.message_id,
         parse_mode: 'Markdown'
@@ -431,9 +410,7 @@ bot.on('message', async (msg) => {
             projectId: "${createdProjectId}",
             name: "ubuntu-ssh",
             source: { image: "ubuntu:22.04" }
-          }) {
-            id
-          }
+          }) { id }
         }`
       };
       const resS = await axios.post('https://backboard.railway.app/graphql/v2', qS, { headers });
@@ -466,8 +443,8 @@ bot.on('message', async (msg) => {
         }, { headers }).catch(() => {});
       }
 
-      // PERBAIKAN: startCommand dioptimalkan agar lebih tahan banting dan cepat diproses Railway
-      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive && apt-get update -qq && apt-get install -y -qq openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D"`;
+      // PERBAIKAN: Menghapus flag "-qq" agar output apt-get muncul di console log Railway jika gagal. Dan penambahan opsi "-e" pada sshd agar melapor error.
+      const startCmd = `/bin/bash -c "export DEBIAN_FRONTEND=noninteractive && apt-get update && apt-get install -y openssh-server && mkdir -p /run/sshd && echo 'root:${pass}' | chpasswd && sed -i 's/^#*PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && sed -i 's/^#*PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && /usr/sbin/sshd -D -e"`;
 
       await axios.post('https://backboard.railway.app/graphql/v2', {
         query: `mutation($serviceId: String!, $environmentId: String!, $input: ServiceInstanceUpdateInput!) {
@@ -543,7 +520,7 @@ bot.on('message', async (msg) => {
         async (curElapsed) => {
           try {
             await bot.editMessageText(
-              `⏳ *Sedang Menyiapkan VPS...* [⏱️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu container boot & port SSH aktif (Toleransi: 5 Menit)...\n\n_Mendeteksi status backend Railway otomatis..._`,
+              `⏳ *Sedang Menyiapkan VPS...* [⏱️️ ${curElapsed}s]\n📍 *Tahap 5/5:* Menunggu proses instalasi package OS Ubuntu (Batas Toleransi: 5 Menit)...\n\n_Pengecekan live berjalan realtime..._`,
               {
                 chat_id: id,
                 message_id: statusMsg.message_id,
@@ -574,9 +551,8 @@ bot.on('message', async (msg) => {
       const failReason = checkResult.reason;
 
       if (!isOnline) {
-        
         await bot.editMessageText(
-          `⏳ *Menyusun Laporan Kegagalan...*\nSedang mengambil console log dari backend Railway...`,
+          `⏳ *Menyusun Laporan Kegagalan...*\nSedang mengambil console log penuh dari backend Railway...`,
           { chat_id: id, message_id: statusMsg.message_id, parse_mode: 'Markdown' }
         ).catch(() => {});
 
@@ -605,7 +581,7 @@ bot.on('message', async (msg) => {
       db.vps[id] = { projectId: createdProjectId, pass: pass, dom: resolvedIp, port: port };
       saveDB(db);
 
-      let info = '🎉 *VPS Ubuntu 22.04 Berhasil Aktif & Siap Digunakan!*\n';
+      let info = '🎉 *VPS Ubuntu Berhasil Aktif & Siap Digunakan!*\n';
       info += '━━━━━━━━━━━━━━━━━━━━━\n';
       info += '🌐 *IP Address :* `' + resolvedIp + '`\n';
       info += '🔌 *Port SSH   :* `' + port + '`\n';
@@ -659,7 +635,7 @@ bot.on('message', async (msg) => {
 
       buttons.push([{ text: '❌ Batal', callback_data: 'del_cancel' }]);
 
-      await bot.editMessageText('🗑️ *Pilih Project VPS yang Ingin Dihapus:*\nKlik salah satu tombol di bawah untuk menghapusnya langsung dari Railway:', {
+      await bot.editMessageText('🗑️️ *Pilih Project VPS yang Ingin Dihapus:*\nKlik salah satu tombol di bawah untuk menghapusnya langsung dari Railway:', {
         chat_id: id,
         message_id: waitMsg.message_id,
         parse_mode: 'Markdown',
